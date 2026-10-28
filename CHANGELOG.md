@@ -5,6 +5,8 @@ All notable changes to Localizer-IoT are documented here.
 ## [0.9.0.0] — 2026-10-29
 
 ### Added
+- Added JSON save/load profiles for source paths, explicit CAB list, output path, selected image indexes, and the opt-in language-capability Windows Update setting.
+- Added local SHA-256 cache manifests for DISM-readable CAB payloads and fallback to a matching verified cache if online UUP discovery/download cannot provide a usable package.
 - Added up to three parallel UUP payload transfers, retry/backoff for temporary network/API failures, HTTP Range continuation for partial payloads, and refreshed payload URLs after expiry/authorization errors.
 - Added a visible cancellation action for UUP discovery/download; verified cache entries are reused and incomplete `.partial` downloads are retained for possible resumption.
 - Added an explicit, disabled-by-default option to use the configured Windows Update/WSUS source only for missing language Features on Demand capabilities. This option does not add LCU, SSU, KB, MSU, or other OS update packages.
