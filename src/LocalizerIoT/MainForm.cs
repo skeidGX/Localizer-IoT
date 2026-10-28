@@ -26,7 +26,7 @@ public sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "Localizer-IoT — русификация Windows IoT Enterprise LTSC";
+        Text = "Localizer-IoT Alpha 0.1.0.1 — русификация Windows IoT Enterprise LTSC";
         Width = 1080;
         Height = 800;
         MinimumSize = new Size(850, 650);
