@@ -561,7 +561,10 @@ public sealed class MainForm : Form
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         for (var row = 0; row < 3; row++) footer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        _status.AutoSize = true;
+        _status.AutoSize = false;
+        _status.Dock = DockStyle.Fill;
+        _status.AutoEllipsis = true;
+        _status.TextAlign = ContentAlignment.MiddleLeft;
         _status.Font = new Font("Segoe UI", 9.25f, FontStyle.Bold);
         _status.ForeColor = Color.FromArgb(47, 72, 95);
         _status.BackColor = Color.FromArgb(231, 237, 244);
@@ -867,7 +870,7 @@ public sealed class MainForm : Form
     {
         if (!ValidateIso()) return;
         SetBusy(true);
-        _progress.Value = 0;
+        SetProgressUi(0);
         try
         {
             var result = await DownloadRussianPackagesWithCancellationAsync();
@@ -935,7 +938,7 @@ public sealed class MainForm : Form
         if (string.IsNullOrWhiteSpace(_packageSource.Text) && cabFiles.Length == 0 && !DonorFolderHasCoreLanguagePack())
         {
             SetBusy(true);
-            _progress.Value = 0;
+            SetProgressUi(0);
             try
             {
                 Log("Не найден отдельный основной Language Pack CAB — запускаю автоматический поиск и скачивание ru-RU.");
@@ -982,12 +985,12 @@ public sealed class MainForm : Form
                 SetBusy(true);
                 try
                 {
-                    _progress.Value = 0;
+                    SetProgressUi(0);
                     if (hasCompatibleWinPe)
                         await ImageServicingEngine.EnsureDeploymentToolsAsync(Log);
                     else
                         await ImageServicingEngine.EnsureCompatibleSetupToolsAsync(_iso.Text.Trim(), Log);
-                    _progress.Value = 5;
+                    SetProgressUi(5);
                 }
                 catch (Exception ex)
                 {
@@ -1029,15 +1032,15 @@ public sealed class MainForm : Form
             _useWindowsUpdateForCapabilities.Checked);
 
         SetBusy(true);
-        _progress.Value = 0;
+        SetProgressUi(0);
         try
         {
             await Task.Run(() => ImageServicingEngine.Run(request, (p, message) =>
             {
-                Ui(() => _progress.Value = Math.Clamp(p, 0, 100));
+                Ui(() => SetProgressUi(Math.Clamp(p, 0, 100)));
                 Log(message);
             }));
-            Ui(() => _progress.Value = 100);
+            Ui(() => SetProgressUi(100));
             MessageBox.Show(this, "Операция завершена. Обязательно изучите отчёт рядом с ISO: он содержит предупреждения о недостающих или несовместимых компонентах. Проверьте загрузку в виртуальной машине до установки на устройство.",
                 "Обработка завершена", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
@@ -1105,7 +1108,7 @@ public sealed class MainForm : Form
 
         var output = Path.GetFullPath(dialog.FileName);
         SetBusy(true);
-        _progress.Value = 0;
+        SetProgressUi(0);
         var temp = output + ".building";
         try
         {
@@ -1124,7 +1127,7 @@ public sealed class MainForm : Form
                     foreach (var file in sourceFiles)
                     {
                         scanned++;
-                        if (scanned % 250 == 0) Ui(() => _progress.Value = Math.Min(35, _progress.Value + 1));
+                        if (scanned % 250 == 0) Ui(() => SetProgressUi(Math.Min(35, _progress.Value + 1)));
                         var normalized = file.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
                         var relative = Path.GetRelativePath(root, file);
                         var lower = normalized.ToLowerInvariant();
@@ -1174,7 +1177,7 @@ public sealed class MainForm : Form
                         using (var dest = entry.Open()) input.CopyTo(dest);
                         report.AppendLine($"{info.Length}\t{hash}\t{item.Key}");
                         index++;
-                        if (index % 20 == 0) Ui(() => _progress.Value = 35 + (int)(60.0 * index / files.Count));
+                        if (index % 20 == 0) Ui(() => SetProgressUi(35 + (int)(60.0 * index / files.Count)));
                     }
                     var manifest = zip.CreateEntry("bundle-manifest.txt", CompressionLevel.Optimal);
                     using (var writer = new StreamWriter(manifest.Open(), new UTF8Encoding(false)))
@@ -1283,7 +1286,7 @@ public sealed class MainForm : Form
         try
         {
             return await UupLanguagePackDownloader.DownloadRussianPackagesAsync(
-                _iso.Text.Trim(), Log, p => Ui(() => _progress.Value = Math.Clamp(p, 0, 100)), cts.Token);
+                _iso.Text.Trim(), Log, p => Ui(() => SetProgressUi(Math.Clamp(p, 0, 100))), cts.Token);
         }
         finally
         {
