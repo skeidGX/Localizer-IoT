@@ -276,7 +276,7 @@ internal static class ImageServicingEngine
                     throw new InvalidOperationException("Русский ISO-донор должен быть существующей папкой или ISO-файлом.");
                 }
 
-                packageRoots.Add(donorMediaRoot);
+                if (donorMediaRoot is not null) packageRoots.Add(donorMediaRoot);
                 report(6, "Добавлен русский ISO-донор: поиск Language Pack, FOD, WinPE и ресурсов sources\\ru-ru.");
                 var donorInstallImage = new[]
                 {
