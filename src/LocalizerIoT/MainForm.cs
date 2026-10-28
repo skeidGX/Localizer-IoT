@@ -686,12 +686,11 @@ public sealed class MainForm : Form
                         if (index % 20 == 0) Ui(() => _progress.Value = 35 + (int)(60.0 * index / files.Count));
                     }
                     var manifest = zip.CreateEntry("bundle-manifest.txt", CompressionLevel.Optimal);
-                    using var writer = new StreamWriter(manifest.Open(), new UTF8Encoding(false));
-                    writer.Write(report.ToString());
+                    using (var writer = new StreamWriter(manifest.Open(), new UTF8Encoding(false)))
+                        writer.Write(report.ToString());
                 }
             });
-            if (File.Exists(output)) File.Delete(output);
-            File.Move(temp, output);
+            File.Move(temp, output, true);
             _progress.Value = 100;
             Log("Офлайн-пакет создан: " + output);
             MessageBox.Show(this, "Офлайн-пакет создан. Внутри — найденные русские Language Pack/FOD/WinPE CAB и ресурсы sources\\ru-ru, если они были в папках-источниках. LCU/SSU/KB/MSU не включаются. Проверьте bundle-manifest.txt.",
