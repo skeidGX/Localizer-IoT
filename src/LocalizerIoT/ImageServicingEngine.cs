@@ -496,30 +496,64 @@ internal static class ImageServicingEngine
     {
         var apply = packages.Where(p => !IsLanguageFeatureSatellite(p)).ToArray();
         if (apply.Length == 0) throw new InvalidOperationException("Не найдено применимых CAB-пакетов русского языка.");
+        var installedIdentities = GetInstalledPackageIdentities(dism, mountDir, warnings);
+        var added = 0;
+        var skipped = 0;
         for (var i = 0; i < apply.Length; i++)
         {
             var package = apply[i];
             var p = Math.Clamp(baseProgress + offset + (int)(range * (double)i / apply.Length), 0, 96);
-            report(p, $"Проверяю совместимость и добавляю языковой пакет {i + 1}/{apply.Length}: {Path.GetFileName(package)}");
-            ValidatePackageCompatibility(dism, package, targetVersion, targetArchitecture, warnings);
+            report(p, $"Проверяю совместимость языкового пакета {i + 1}/{apply.Length}: {Path.GetFileName(package)}");
+            var identity = ValidatePackageCompatibility(dism, package, targetVersion, targetArchitecture, warnings);
+            if (!string.IsNullOrWhiteSpace(identity) && installedIdentities.Contains(identity))
+            {
+                skipped++;
+                report(p, $"Уже установлен, пропускаю: {Path.GetFileName(package)}");
+                continue;
+            }
             var add = Run(dism, "/Image:" + mountDir, "/Add-Package", "/PackagePath:" + package);
             if (add.ExitCode != 0)
                 throw new InvalidOperationException($"DISM не смог добавить пакет {Path.GetFileName(package)}. Возможны несовпадение версии/архитектуры или отсутствие зависимости.\r\n{ShortOutput(add.Output)}");
+            added++;
+            if (!string.IsNullOrWhiteSpace(identity)) installedIdentities.Add(identity);
         }
+        report(baseProgress + offset + range, $"Пакеты обработаны: добавлено {added}, пропущено уже установленных {skipped}.");
     }
 
-    private static void ValidatePackageCompatibility(string dism, string package, string targetVersion, string targetArchitecture, List<string> warnings)
+    private static HashSet<string> GetInstalledPackageIdentities(string dism, string mountDir, List<string> warnings)
+    {
+        var installed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = Run(dism, "/English", "/Image:" + mountDir, "/Get-Packages");
+        if (result.ExitCode != 0)
+        {
+            AddWarning(warnings, "Не удалось запросить список уже установленных пакетов; дубликаты проверит DISM.");
+            return installed;
+        }
+
+        var identities = Regex.Matches(result.Output, @"(?im)^\s*Package Identity\s*:\s*(.+)$");
+        for (var i = 0; i < identities.Count; i++)
+        {
+            var start = identities[i].Index;
+            var end = i + 1 < identities.Count ? identities[i + 1].Index : result.Output.Length;
+            var block = result.Output.Substring(start, end - start);
+            if (Regex.IsMatch(block, @"(?im)^\s*State\s*:\s*Installed\s*$"))
+                installed.Add(identities[i].Groups[1].Value.Trim());
+        }
+        return installed;
+    }
+
+    private static string? ValidatePackageCompatibility(string dism, string package, string targetVersion, string targetArchitecture, List<string> warnings)
     {
         var info = Run(dism, "/English", "/Get-PackageInfo", "/PackagePath:" + package);
         if (info.ExitCode != 0)
         {
             AddWarning(warnings, $"Не удалось заранее прочитать метаданные CAB {Path.GetFileName(package)}; совместимость проверит DISM при установке.");
-            return;
+            return null;
         }
 
         var identityMatch = Regex.Match(info.Output, @"(?im)^\s*Package Identity\s*:\s*(.+)$");
         if (!identityMatch.Success) identityMatch = Regex.Match(info.Output, @"(?im)^\s*Identity\s*:\s*(.+)$");
-        if (!identityMatch.Success) return;
+        if (!identityMatch.Success) return null;
         var identity = identityMatch.Groups[1].Value.Trim();
 
         var targetBuild = GetBuildVersion(targetVersion);
@@ -541,6 +575,7 @@ internal static class ImageServicingEngine
             if (!packageArch.Equals(targetArch, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException($"CAB {Path.GetFileName(package)} рассчитан на {packageArch}, а образ имеет архитектуру {targetArchitecture}.");
         }
+        return identity;
     }
 
     private static string? GetBuildVersion(string version)
