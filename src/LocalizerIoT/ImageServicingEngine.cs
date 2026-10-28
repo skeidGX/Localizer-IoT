@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Principal;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -16,7 +17,8 @@ internal sealed record LocalizationRequest(
     string[] ExplicitCabFiles,
     string OutputIso,
     bool AllIndexes,
-    int SelectedIndex);
+    int SelectedIndex,
+    bool AllowWindowsUpdateForCapabilities = false);
 
 internal static class ImageServicingEngine
 {
@@ -210,8 +212,20 @@ internal static class ImageServicingEngine
                 if (Directory.Exists(setupMedia)) setupMediaRoot = Path.GetFullPath(setupMedia);
                 else if (File.Exists(setupMedia) && Path.GetExtension(setupMedia).Equals(".iso", StringComparison.OrdinalIgnoreCase))
                 {
-                    setupMediaLetter = MountIso(Path.GetFullPath(setupMedia));
-                    setupMediaRoot = setupMediaLetter + @":\";
+                    var fullSetupMedia = Path.GetFullPath(setupMedia);
+                    if (!string.IsNullOrWhiteSpace(request.PackageSource) &&
+                        File.Exists(request.PackageSource.Trim()) &&
+                        PathComparer.Equals(fullSetupMedia, Path.GetFullPath(request.PackageSource.Trim())) &&
+                        packageRoot is not null)
+                    {
+                        setupMediaRoot = packageRoot;
+                        report(5, "Language Pack и Setup используют один смонтированный ISO; повторное подключение пропущено.");
+                    }
+                    else
+                    {
+                        setupMediaLetter = MountIso(fullSetupMedia);
+                        setupMediaRoot = setupMediaLetter + @":\";
+                    }
                 }
                 else throw new InvalidOperationException("Источник ресурсов Windows Setup должен быть существующей папкой или ISO-файлом.");
             }
@@ -223,7 +237,10 @@ internal static class ImageServicingEngine
                 var fodSource = request.FodSource.Trim();
                 var sameAsPackageSource = !string.IsNullOrWhiteSpace(request.PackageSource) &&
                     PathComparer.Equals(Path.GetFullPath(fodSource), Path.GetFullPath(request.PackageSource.Trim()));
-                if (!sameAsPackageSource)
+                var sameAsSetupSource = !string.IsNullOrWhiteSpace(request.RussianSetupMedia) &&
+                    PathComparer.Equals(Path.GetFullPath(fodSource), Path.GetFullPath(request.RussianSetupMedia.Trim())) &&
+                    setupMediaRoot is not null;
+                if (!sameAsPackageSource && !sameAsSetupSource)
                 {
                     if (Directory.Exists(fodSource)) packageRoots.Add(Path.GetFullPath(fodSource));
                     else if (File.Exists(fodSource) && Path.GetExtension(fodSource).Equals(".iso", StringComparison.OrdinalIgnoreCase))
@@ -276,12 +293,13 @@ internal static class ImageServicingEngine
                     throw new InvalidOperationException("Русский ISO-донор должен быть существующей папкой или ISO-файлом.");
                 }
 
-                if (donorMediaRoot is not null) packageRoots.Add(donorMediaRoot);
+                var resolvedDonorRoot = donorMediaRoot ?? throw new InvalidOperationException("Не удалось определить корень русского ISO-донора.");
+                packageRoots.Add(resolvedDonorRoot);
                 report(6, "Добавлен русский ISO-донор: поиск Language Pack, FOD, WinPE и ресурсов sources\\ru-ru.");
                 var donorInstallImage = new[]
                 {
-                    Path.Combine(donorMediaRoot, "sources", "install.wim"),
-                    Path.Combine(donorMediaRoot, "sources", "install.esd")
+                    Path.Combine(resolvedDonorRoot, "sources", "install.wim"),
+                    Path.Combine(resolvedDonorRoot, "sources", "install.esd")
                 }.FirstOrDefault(File.Exists);
                 if (donorInstallImage is not null)
                 {
@@ -310,7 +328,7 @@ internal static class ImageServicingEngine
             report(7, $"Целевая Windows: {targetImageInfo.Name}; версия {targetImageInfo.Version}; сборка {targetBuild}; архитектура {architecture}.");
 
             var discoveredPackages = DiscoverRussianPackages(packageRoots, request.ExplicitCabFiles);
-            var packages = FilterForArchitecture(discoveredPackages, architecture, report);
+            var packages = DeduplicateIdenticalPackageFiles(FilterForArchitecture(discoveredPackages, architecture, report), report);
             var capabilitySources = FindCapabilitySources(packageRoots);
             var windowsPackages = packages.Where(p => !IsWinPePackage(p) && !IsLanguageFeatureSatellite(p)).Distinct(PathComparer)
                 .OrderByDescending(IsCoreLanguagePack).ThenBy(p => p, PathComparer).ToArray();
@@ -373,9 +391,9 @@ internal static class ImageServicingEngine
                 try
                 {
                     ApplyCabPackages(dism, mountDir, windowsPackages, imageInfo.Version, imageInfo.Architecture, warnings, report, progress, 25, 40);
-                    TryAddLanguageCapabilities(dism, mountDir, packages.ToArray(), capabilitySources, warnings, report, progress);
+                    TryAddLanguageCapabilities(dism, mountDir, packages.ToArray(), capabilitySources, warnings, report, progress, request.AllowWindowsUpdateForCapabilities);
                     SetRussianDefaults(dism, mountDir, warnings, report, progress);
-                    TryServiceWinRe(dism, mountDir, work, windowsPackages, packages.ToArray(), capabilitySources, warnings, report, progress);
+                    TryServiceWinRe(dism, mountDir, work, packageRoots.ToArray(), warnings, report, progress);
                     var langIni = Run(dism, "/Image:" + mountDir, "/Gen-LangINI", "/Distribution:" + stage);
                     if (langIni.ExitCode != 0) AddWarning(warnings, "DISM /Gen-LangINI не сработал: " + ShortOutput(langIni.Output));
                     var unmount = Run(dism, "/Unmount-Image", "/MountDir:" + mountDir, "/Commit", "/CheckIntegrity");
@@ -436,6 +454,8 @@ internal static class ImageServicingEngine
             reportText.AppendLine("Russian donor media: " + (string.IsNullOrWhiteSpace(request.RussianDonorMedia) ? "(not specified)" : request.RussianDonorMedia));
             reportText.AppendLine("Architecture: " + architecture);
             reportText.AppendLine("Image indexes serviced: " + string.Join(", ", installIndices));
+            reportText.AppendLine("Windows Update for language capabilities on install image only (never WinRE/OS updates): " + (request.AllowWindowsUpdateForCapabilities ? "enabled by user" : "disabled"));
+            reportText.AppendLine("Windows OS updates integrated: no");
             reportText.AppendLine("Language packages:");
             foreach (var package in windowsPackages) reportText.AppendLine("  " + package);
             reportText.AppendLine("Warnings / incomplete localization:");
@@ -476,30 +496,64 @@ internal static class ImageServicingEngine
     {
         var apply = packages.Where(p => !IsLanguageFeatureSatellite(p)).ToArray();
         if (apply.Length == 0) throw new InvalidOperationException("Не найдено применимых CAB-пакетов русского языка.");
+        var installedIdentities = GetInstalledPackageIdentities(dism, mountDir, warnings);
+        var added = 0;
+        var skipped = 0;
         for (var i = 0; i < apply.Length; i++)
         {
             var package = apply[i];
             var p = Math.Clamp(baseProgress + offset + (int)(range * (double)i / apply.Length), 0, 96);
-            report(p, $"Проверяю совместимость и добавляю языковой пакет {i + 1}/{apply.Length}: {Path.GetFileName(package)}");
-            ValidatePackageCompatibility(dism, package, targetVersion, targetArchitecture, warnings);
+            report(p, $"Проверяю совместимость языкового пакета {i + 1}/{apply.Length}: {Path.GetFileName(package)}");
+            var identity = ValidatePackageCompatibility(dism, package, targetVersion, targetArchitecture, warnings);
+            if (!string.IsNullOrWhiteSpace(identity) && installedIdentities.Contains(identity))
+            {
+                skipped++;
+                report(p, $"Уже установлен, пропускаю: {Path.GetFileName(package)}");
+                continue;
+            }
             var add = Run(dism, "/Image:" + mountDir, "/Add-Package", "/PackagePath:" + package);
             if (add.ExitCode != 0)
                 throw new InvalidOperationException($"DISM не смог добавить пакет {Path.GetFileName(package)}. Возможны несовпадение версии/архитектуры или отсутствие зависимости.\r\n{ShortOutput(add.Output)}");
+            added++;
+            if (!string.IsNullOrWhiteSpace(identity)) installedIdentities.Add(identity);
         }
+        report(baseProgress + offset + range, $"Пакеты обработаны: добавлено {added}, пропущено уже установленных {skipped}.");
     }
 
-    private static void ValidatePackageCompatibility(string dism, string package, string targetVersion, string targetArchitecture, List<string> warnings)
+    private static HashSet<string> GetInstalledPackageIdentities(string dism, string mountDir, List<string> warnings)
+    {
+        var installed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = Run(dism, "/English", "/Image:" + mountDir, "/Get-Packages");
+        if (result.ExitCode != 0)
+        {
+            AddWarning(warnings, "Не удалось запросить список уже установленных пакетов; дубликаты проверит DISM.");
+            return installed;
+        }
+
+        var identities = Regex.Matches(result.Output, @"(?im)^\s*Package Identity\s*:\s*(.+)$");
+        for (var i = 0; i < identities.Count; i++)
+        {
+            var start = identities[i].Index;
+            var end = i + 1 < identities.Count ? identities[i + 1].Index : result.Output.Length;
+            var block = result.Output.Substring(start, end - start);
+            if (Regex.IsMatch(block, @"(?im)^\s*State\s*:\s*Installed\s*$"))
+                installed.Add(identities[i].Groups[1].Value.Trim());
+        }
+        return installed;
+    }
+
+    private static string? ValidatePackageCompatibility(string dism, string package, string targetVersion, string targetArchitecture, List<string> warnings)
     {
         var info = Run(dism, "/English", "/Get-PackageInfo", "/PackagePath:" + package);
         if (info.ExitCode != 0)
         {
             AddWarning(warnings, $"Не удалось заранее прочитать метаданные CAB {Path.GetFileName(package)}; совместимость проверит DISM при установке.");
-            return;
+            return null;
         }
 
         var identityMatch = Regex.Match(info.Output, @"(?im)^\s*Package Identity\s*:\s*(.+)$");
         if (!identityMatch.Success) identityMatch = Regex.Match(info.Output, @"(?im)^\s*Identity\s*:\s*(.+)$");
-        if (!identityMatch.Success) return;
+        if (!identityMatch.Success) return null;
         var identity = identityMatch.Groups[1].Value.Trim();
 
         var targetBuild = GetBuildVersion(targetVersion);
@@ -521,6 +575,7 @@ internal static class ImageServicingEngine
             if (!packageArch.Equals(targetArch, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException($"CAB {Path.GetFileName(package)} рассчитан на {packageArch}, а образ имеет архитектуру {targetArchitecture}.");
         }
+        return identity;
     }
 
     private static string? GetBuildVersion(string version)
@@ -548,6 +603,8 @@ internal static class ImageServicingEngine
             if (packageMajorBuild == 19041 && targetMajorBuild is >= 19041 and <= 19045) return true;
             // Windows 11 23H2 is an enablement release based on the 22621 servicing baseline.
             if (packageMajorBuild == 22621 && targetMajorBuild is 22621 or 22631) return true;
+            // Windows 11 24H2, 25H2 and 26H2 share the 26100 servicing branch.
+            if (packageMajorBuild == 26100 && targetMajorBuild is 26100 or 26200 or 26300) return true;
         }
         return false;
     }
@@ -560,14 +617,16 @@ internal static class ImageServicingEngine
     }
 
     private static void TryAddLanguageCapabilities(string dism, string mountDir, string[] packages, string[] capabilitySources, List<string> warnings,
-        Action<int, string> report, int progress)
+        Action<int, string> report, int progress, bool allowWindowsUpdate = false)
     {
         var fodPackagesExist = packages.Any(IsLanguageFeatureSatellite);
-        if (!fodPackagesExist)
+        if (!fodPackagesExist && !allowWindowsUpdate)
         {
             AddWarning(warnings, "В предоставленном источнике не обнаружены Russian Language Features on Demand; OCR/речь/рукописный ввод могут остаться на английском или отсутствовать.");
             return;
         }
+        if (!fodPackagesExist && allowWindowsUpdate)
+            report(progress, "Локальные языковые FOD не найдены. Разрешён отдельный запрос только языковых возможностей через Windows Update; обновления ОС не запрашиваются.");
 
         var capabilities = new[]
         {
@@ -581,11 +640,6 @@ internal static class ImageServicingEngine
         foreach (var cap in capabilities)
         {
             var sources = capabilitySources;
-            if (sources.Length == 0)
-            {
-                AddWarning(warnings, $"Не найден источник FOD для {cap}.");
-                continue;
-            }
             var done = false;
             foreach (var source in sources)
             {
@@ -600,6 +654,18 @@ internal static class ImageServicingEngine
                 if (!result.Output.Contains("0x800f081f", StringComparison.OrdinalIgnoreCase) &&
                     !result.Output.Contains("source files could not be found", StringComparison.OrdinalIgnoreCase))
                     AddWarning(warnings, $"DISM не смог добавить FOD {cap}: {ShortOutput(result.Output)}");
+            }
+            if (!done && allowWindowsUpdate)
+            {
+                report(progress + 1, $"Пробую получить языковую возможность через настроенный Windows Update: {cap}");
+                var online = Run(dism, "/Image:" + mountDir, "/Add-Capability", "/CapabilityName:" + cap);
+                if (online.ExitCode == 0 || online.Output.Contains("already installed", StringComparison.OrdinalIgnoreCase))
+                {
+                    report(progress + 2, $"Языковая возможность получена из источника Windows Update: {cap}");
+                    done = true;
+                }
+                else
+                    AddWarning(warnings, $"Windows Update не смог предоставить FOD {cap}: {ShortOutput(online.Output)}");
             }
             if (!done) AddWarning(warnings, $"FOD {cap} не установлен: отсутствует совместимый источник или компонент не поддерживается данным выпуском.");
         }
@@ -642,8 +708,8 @@ internal static class ImageServicingEngine
         if (r.ExitCode != 0) AddWarning(warnings, $"Не удалось применить {setting}: {ShortOutput(r.Output)}");
     }
 
-    private static void TryServiceWinRe(string dism, string windowsMount, string work, string[] windowsPackages,
-        string[] allLanguagePackages, string[] capabilitySources, List<string> warnings, Action<int, string> report, int progress)
+    private static void TryServiceWinRe(string dism, string windowsMount, string work, string[] packageRoots,
+        List<string> warnings, Action<int, string> report, int progress)
     {
         var winre = Path.Combine(windowsMount, "Windows", "System32", "Recovery", "winre.wim");
         if (!File.Exists(winre))
@@ -651,12 +717,7 @@ internal static class ImageServicingEngine
             report(progress + 5, "WinRE не найден внутри этого индекса; пропускаю встроенную среду восстановления.");
             return;
         }
-        var languagePacks = windowsPackages.Where(IsCoreLanguagePack).ToArray();
-        if (languagePacks.Length == 0)
-        {
-            AddWarning(warnings, "WinRE найден, но основной русский Language Pack не обнаружен; WinRE не локализован.");
-            return;
-        }
+
         var winreCopy = Path.Combine(work, "winre-copy-" + Guid.NewGuid().ToString("N") + ".wim");
         var winreMount = Path.Combine(work, "winre-mount-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(winreMount);
@@ -668,26 +729,66 @@ internal static class ImageServicingEngine
             if (mount.ExitCode != 0) throw new InvalidOperationException(ShortOutput(mount.Output));
             isMounted = true;
             var winreInfo = ReadFirstImageInfo(dism, winreCopy);
-            foreach (var cab in languagePacks)
+            var languageRoot = FindWinReLanguagePackageRoot(packageRoots, winreInfo.Architecture);
+            if (languageRoot is null)
             {
-                ValidatePackageCompatibility(dism, cab, winreInfo.Version, winreInfo.Architecture, warnings);
-                var add = Run(dism, "/Image:" + winreMount, "/Add-Package", "/PackagePath:" + cab);
-                if (add.ExitCode != 0)
-                    throw new InvalidOperationException($"Не удалось добавить русский Language Pack в WinRE ({Path.GetFileName(cab)}): {ShortOutput(add.Output)}");
+                AddWarning(warnings, "WinRE не изменён: не найден официальный WinRE language media с WinPE_OCs\\ru-ru\\lp.cab. Обычный Windows Language Pack и установленный ADK не используются как замена.");
+                return;
             }
-            TryAddLanguageCapabilities(dism, winreMount, allLanguagePackages, capabilitySources, warnings, report, progress + 2);
-            var intl = Run(dism, "/Image:" + winreMount, "/Set-AllIntl:ru-RU");
-            if (intl.ExitCode != 0) AddWarning(warnings, "Не удалось настроить locale ru-RU в WinRE: " + ShortOutput(intl.Output));
-            var commit = Run(dism, "/Unmount-Image", "/MountDir:" + winreMount, "/Commit", "/CheckIntegrity");
-            EnsureSuccess(commit, "Не удалось зафиксировать локализацию WinRE.");
-            isMounted = false;
-            File.Copy(winreCopy, winre, true);
-            report(progress + 6, "WinRE обработан. Проверьте предупреждения о недостающих language FOD.");
+
+            var lp = Path.Combine(languageRoot, "lp.cab");
+            var installedComponents = GetInstalledWinPeComponentNames(dism, winreMount, warnings);
+            try
+            {
+                ValidatePackageCompatibility(dism, lp, winreInfo.Version, winreInfo.Architecture, warnings);
+                var addLp = Run(dism, "/Image:" + winreMount, "/Add-Package", "/PackagePath:" + lp);
+                if (addLp.ExitCode != 0)
+                    throw new InvalidOperationException($"Не удалось добавить WinRE базовый русский язык (lp.cab): {ShortOutput(addLp.Output)}");
+
+                var availableCabs = GetWinPeCabs(languageRoot);
+                var appliedComponents = 0;
+                foreach (var component in installedComponents)
+                {
+                    var suffix = "_" + "ru-ru";
+                    var cab = availableCabs.FirstOrDefault(p =>
+                        Path.GetFileName(p).Equals(component + suffix + ".cab", StringComparison.OrdinalIgnoreCase));
+                    if (cab is null)
+                    {
+                        AddWarning(warnings, $"В WinRE-источнике отсутствует язык {component}_ru-ru.cab для установленного recovery-компонента.");
+                        continue;
+                    }
+
+                    ValidatePackageCompatibility(dism, cab, winreInfo.Version, winreInfo.Architecture, warnings);
+                    var add = Run(dism, "/Image:" + winreMount, "/Add-Package", "/PackagePath:" + cab);
+                    if (add.ExitCode != 0)
+                    {
+                        AddWarning(warnings, $"Не удалось добавить language pack WinRE-компонента {Path.GetFileName(cab)}: {ShortOutput(add.Output)}");
+                        continue;
+                    }
+                    appliedComponents++;
+                }
+
+                if (installedComponents.Count == 0)
+                    AddWarning(warnings, "DISM не смог определить установленные WinPE optional components в WinRE; добавлен только базовый lp.cab.");
+                else if (appliedComponents < installedComponents.Count)
+                    AddWarning(warnings, $"WinRE локализован частично: языковые CAB добавлены для {appliedComponents} из {installedComponents.Count} обнаруженных optional components.");
+
+                var intl = Run(dism, "/Image:" + winreMount, "/Set-AllIntl:ru-RU");
+                if (intl.ExitCode != 0) AddWarning(warnings, "Не удалось настроить locale ru-RU в WinRE: " + ShortOutput(intl.Output));
+                var commit = Run(dism, "/Unmount-Image", "/MountDir:" + winreMount, "/Commit", "/CheckIntegrity");
+                EnsureSuccess(commit, "Не удалось зафиксировать локализацию WinRE.");
+                isMounted = false;
+                File.Copy(winreCopy, winre, true);
+                report(progress + 6, $"WinRE обработан официальными language resources; optional components: {appliedComponents}/{installedComponents.Count}.");
+            }
+            catch (Exception ex)
+            {
+                AddWarning(warnings, "WinRE остался без гарантированной полной локализации: " + ex.Message);
+            }
         }
         catch (Exception ex)
         {
             AddWarning(warnings, "WinRE остался без гарантированной полной локализации: " + ex.Message);
-            if (isMounted) { Run(dism, "/Unmount-Image", "/MountDir:" + winreMount, "/Discard"); isMounted = false; }
         }
         finally
         {
@@ -695,6 +796,71 @@ internal static class ImageServicingEngine
             try { Directory.Delete(winreMount, true); } catch { }
             try { if (File.Exists(winreCopy)) File.Delete(winreCopy); } catch { }
         }
+    }
+
+    private static string? FindWinReLanguagePackageRoot(IEnumerable<string> roots, string architecture)
+    {
+        var expectedArch = architecture.Equals("arm64", StringComparison.OrdinalIgnoreCase) ? "arm64" :
+            architecture.Equals("x86", StringComparison.OrdinalIgnoreCase) ? "x86" : "amd64";
+        foreach (var root in roots)
+        {
+            if (!Directory.Exists(root)) continue;
+            try
+            {
+                foreach (var lp in Directory.EnumerateFiles(root, "lp.cab", SearchOption.AllDirectories).Take(100))
+                {
+                    var directory = Path.GetDirectoryName(lp)!;
+                    if (!directory.Contains("WinPE_OCs", StringComparison.OrdinalIgnoreCase) ||
+                        !Path.GetFileName(directory).Equals("ru-ru", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var full = Path.GetFullPath(lp);
+                    if (full.Contains("Assessment and Deployment Kit", StringComparison.OrdinalIgnoreCase) ||
+                        full.Contains("Windows Kits", StringComparison.OrdinalIgnoreCase) &&
+                        full.Contains("Program Files", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var normalized = full.Replace('/', '\\');
+                    var archMatch = Regex.Match(normalized,
+                        @"[\\/](amd64|x86|arm64)[\\/]WinPE_OCs[\\/]", RegexOptions.IgnoreCase);
+                    if (archMatch.Success && !archMatch.Groups[1].Value.Equals(expectedArch, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    return directory;
+                }
+            }
+            catch { }
+        }
+        return null;
+    }
+
+    private static List<string> GetInstalledWinPeComponentNames(string dism, string mountDir, List<string> warnings)
+    {
+        var result = Run(dism, "/English", "/Image:" + mountDir, "/Get-Packages");
+        var components = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (result.ExitCode != 0)
+        {
+            AddWarning(warnings, "Не удалось прочитать список WinRE packages: " + ShortOutput(result.Output));
+            return components.ToList();
+        }
+
+        var identities = Regex.Matches(result.Output, @"(?im)^\s*Package Identity\s*:\s*(.+)$");
+        for (var i = 0; i < identities.Count; i++)
+        {
+            var start = identities[i].Index;
+            var end = i + 1 < identities.Count ? identities[i + 1].Index : result.Output.Length;
+            var block = result.Output.Substring(start, end - start);
+            if (!Regex.IsMatch(block, @"(?im)^\s*State\s*:\s*Installed\s*$")) continue;
+            var identity = identities[i].Groups[1].Value.Trim();
+            var match = Regex.Match(identity, @"(?i)(WinPE-[A-Za-z0-9-]+)");
+            if (!match.Success) continue;
+            var component = match.Groups[1].Value;
+            if (component.EndsWith("-Package", StringComparison.OrdinalIgnoreCase))
+                component = component.Substring(0, component.Length - "-Package".Length);
+            if (component.Equals("WinPE-WiFi", StringComparison.OrdinalIgnoreCase) ||
+                component.Equals("WinPE-LanguagePack", StringComparison.OrdinalIgnoreCase)) continue;
+            components.Add(component);
+        }
+        return components.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     private static void ServiceBootWimIfPossible(string dism, string stage, string architecture, List<string> packageRoots,
@@ -944,6 +1110,62 @@ internal static class ImageServicingEngine
             kept.Add(package);
         }
         return kept;
+    }
+
+    private static List<string> DeduplicateIdenticalPackageFiles(IEnumerable<string> packages, Action<int, string> report)
+    {
+        var kept = new List<string>();
+        var groups = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var shaCache = new Dictionary<string, string>(PathComparer);
+        var duplicates = 0;
+
+        foreach (var path in packages)
+        {
+            FileInfo info;
+            try { info = new FileInfo(path); }
+            catch { kept.Add(path); continue; }
+            var key = Path.GetFileName(path) + "|" + info.Length.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (!groups.TryGetValue(key, out var sameNameAndSize))
+            {
+                groups[key] = new List<string> { path };
+                kept.Add(path);
+                continue;
+            }
+
+            var hash = GetSha256(path, shaCache);
+            var duplicate = false;
+            foreach (var prior in sameNameAndSize)
+            {
+                if (GetSha256(prior, shaCache).Equals(hash, StringComparison.OrdinalIgnoreCase))
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate)
+            {
+                duplicates++;
+                report(8, $"Повтор CAB из нескольких источников пропущен: {Path.GetFileName(path)}");
+                continue;
+            }
+
+            sameNameAndSize.Add(path);
+            kept.Add(path);
+        }
+
+        if (duplicates > 0)
+            report(8, $"Удалено повторяющихся языковых CAB по SHA-256: {duplicates}. Отличающиеся пакеты с одинаковым именем/размером сохраняются.");
+        return kept;
+    }
+
+    private static string GetSha256(string path, Dictionary<string, string> cache)
+    {
+        if (cache.TryGetValue(path, out var hash)) return hash;
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            1024 * 256, FileOptions.SequentialScan);
+        hash = Convert.ToHexString(SHA256.HashData(stream));
+        cache[path] = hash;
+        return hash;
     }
 
     private static bool HasRequiredSetupLanguagePackages(string winpeRoot)
@@ -1398,8 +1620,8 @@ internal static class ImageServicingEngine
             return new SetupKitRelease("Windows 10 version 2004–22H2 / LTSC 2021", "https://go.microsoft.com/fwlink/?linkid=2120254", "https://go.microsoft.com/fwlink/?linkid=2120253");
         if (build is 22621 or 22631)
             return new SetupKitRelease("Windows 11 versions 22H2/23H2", "https://go.microsoft.com/fwlink/?linkid=2196127", "https://go.microsoft.com/fwlink/?linkid=2196224");
-        if (build is >= 26100 and <= 26299)
-            return new SetupKitRelease("Windows 11 version 24H2 or newer compatible servicing baseline", "https://go.microsoft.com/fwlink/?linkid=2289980", "https://go.microsoft.com/fwlink/?linkid=2289981");
+        if (build is 26100 or 26200 or 26300)
+            return new SetupKitRelease("Windows 11 versions 24H2/25H2/26H2 (ADK 10.1.26100.9457 servicing baseline)", "https://go.microsoft.com/fwlink/?linkid=2289980", "https://go.microsoft.com/fwlink/?linkid=2289981");
         return null;
     }
 

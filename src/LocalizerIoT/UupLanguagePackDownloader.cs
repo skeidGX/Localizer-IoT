@@ -30,7 +30,10 @@ internal static class UupLanguagePackDownloader
     private static readonly HttpClient Client = CreateClient();
 
     private sealed record UupBuild(string Id, string Build, string Architecture, string Title, long Created);
-    private sealed record UupFile(string Name, string Sha1, long Size, string Url);
+    private sealed record UupFile(string Name, string Sha1, long Size, string Url, long ExpiresAt);
+    private sealed record CacheManifest(int FormatVersion, string UupId, string UupBuild, int TargetBuild,
+        int LanguagePackBaseBuild, string Architecture, DateTimeOffset CreatedAt, CacheManifestEntry[] Files);
+    private sealed record CacheManifestEntry(string Name, long Size, string Sha256);
 
     private static HttpClient CreateClient()
     {
@@ -60,16 +63,20 @@ internal static class UupLanguagePackDownloader
         log($"Образ: {image.Name}; версия {image.Version}; сборка {targetBuild}; архитектура {arch}. Ищу ru-RU на базе {baseBuild}.");
         progress?.Invoke(3);
 
-        var builds = await FindBuildCandidatesAsync(targetBuild, baseBuild, arch, log, cancellationToken);
-        if (builds.Count == 0)
-            throw new InvalidOperationException(
-                $"UUP Dump не вернул подходящий выпуск для базы {baseBuild} и архитектуры {arch}. " +
-                "Автоматический подбор недоступен для этой версии; укажите совместимый официальный Language Pack ISO или папку с CAB.");
-
         var cacheBase = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Localizer-IoT", "Cache", "ru-RU", $"{baseBuild}-{arch}");
         Directory.CreateDirectory(cacheBase);
+
+        var builds = await FindBuildCandidatesAsync(targetBuild, baseBuild, arch, log, cancellationToken);
+        if (builds.Count == 0)
+        {
+            var offline = await TryUseVerifiedCacheAsync(cacheBase, targetBuild, baseBuild, arch, log, cancellationToken);
+            if (offline is not null) return offline;
+            throw new InvalidOperationException(
+                $"UUP Dump не вернул подходящий выпуск для базы {baseBuild} и архитектуры {arch}, а в локальном кеше нет подтверждённого Language Pack. " +
+                "Проверьте интернет или укажите совместимый официальный Language Pack ISO/папку с CAB.");
+        }
 
         var errors = new List<string>();
         foreach (var build in builds)
@@ -96,54 +103,82 @@ internal static class UupLanguagePackDownloader
 
                 var ready = 0;
                 var fodReady = 0;
-                var cacheOk = true;
-                var esdFiles = new List<string>();
-                for (var i = 0; i < files.Count; i++)
+                var cacheOk = 1;
+                var esdFiles = new System.Collections.Concurrent.ConcurrentBag<string>();
+                var completedDownloads = 0;
+                var downloadErrors = new System.Collections.Concurrent.ConcurrentBag<string>();
+                var totalBytes = files.Count > 0 && files.All(f => f.Size > 0) ? files.Sum(f => f.Size) : 0L;
+                long downloadedBytes = 0;
+                var showByteProgress = totalBytes > 0;
+                log($"Загружаю файлы параллельно (до 3 потоков); подтверждённые файлы кеша будут переиспользованы.");
+                if (showByteProgress) log($"Размер языковых файлов по манифесту: {totalBytes / (1024.0 * 1024.0):N1} МиБ.");
+                await Parallel.ForEachAsync(files, new ParallelOptions
                 {
-                    var file = files[i];
-                    cancellationToken.ThrowIfCancellationRequested();
+                    MaxDegreeOfParallelism = 3,
+                    CancellationToken = cancellationToken
+                }, async (file, ct) =>
+                {
                     var safeName = Path.GetFileName(file.Name);
-                    if (string.IsNullOrWhiteSpace(safeName))
-                        continue;
+                    if (string.IsNullOrWhiteSpace(safeName)) return;
                     var localPath = Path.Combine(cacheRoot, safeName);
-                    log($"Скачивание ({i + 1}/{files.Count}): {safeName}");
-                    progress?.Invoke(Math.Clamp(5 + (int)(35.0 * i / Math.Max(1, files.Count)), 5, 40));
                     try
                     {
-                        await DownloadAndVerifyFileAsync(file, localPath, cancellationToken);
+                        Action<long>? byteProgress = showByteProgress ? delta =>
+                        {
+                            var current = Interlocked.Add(ref downloadedBytes, delta);
+                            progress?.Invoke(Math.Clamp(5 + (int)(35.0 * current / totalBytes), 5, 40));
+                        } : null;
+                        await DownloadAndVerifyFileAsync(file, localPath, build.Id, log, byteProgress, ct);
                         if (Path.GetExtension(localPath).Equals(".esd", StringComparison.OrdinalIgnoreCase))
                             esdFiles.Add(localPath);
                         else if (Path.GetExtension(localPath).Equals(".cab", StringComparison.OrdinalIgnoreCase))
                         {
-                            ready++;
-                            if (IsFeaturePackageFile(localPath)) fodReady++;
+                            Interlocked.Increment(ref ready);
+                            if (IsFeaturePackageFile(localPath)) Interlocked.Increment(ref fodReady);
                         }
                     }
+                    catch (OperationCanceledException) { throw; }
                     catch (Exception ex)
                     {
-                        cacheOk = false;
-                        errors.Add($"{safeName}: {ex.Message}");
+                        Interlocked.Exchange(ref cacheOk, 0);
+                        downloadErrors.Add($"{safeName}: {ex.Message}");
                         log($"  Не удалось получить {safeName}: {ex.Message}");
                     }
-                }
+                    var completed = Interlocked.Increment(ref completedDownloads);
+                    if (!showByteProgress)
+                        progress?.Invoke(Math.Clamp(5 + (int)(35.0 * completed / Math.Max(1, files.Count)), 5, 40));
+                });
+                foreach (var error in downloadErrors) errors.Add(error);
 
                 if (esdFiles.Count > 0)
                 {
                     var converter = await EnsureConverterToolsAsync(log, cancellationToken);
-                    for (var i = 0; i < esdFiles.Count; i++)
+                    var orderedEsdFiles = esdFiles.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToArray();
+                    for (var i = 0; i < orderedEsdFiles.Length; i++)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
-                        var esd = esdFiles[i];
+                        var esd = orderedEsdFiles[i];
                         var cab = Path.ChangeExtension(esd, ".cab");
-                        if (File.Exists(cab) && new FileInfo(cab).Length > 0)
+                        if (File.Exists(cab) && new FileInfo(cab).Length > 0 && await VerifyCabPackageAsync(cab, cancellationToken))
                         {
                             ready++;
                             if (IsFeaturePackageFile(cab)) fodReady++;
+                            log("  CAB cache verified by DISM: " + Path.GetFileName(cab));
                             continue;
                         }
-                        log($"Преобразую языковой ESD в CAB ({i + 1}/{esdFiles.Count}): {Path.GetFileName(esd)}");
-                        progress?.Invoke(Math.Clamp(42 + (int)(20.0 * i / Math.Max(1, esdFiles.Count)), 42, 62));
+                        if (File.Exists(cab))
+                        {
+                            log("  Удаляю некорректный/нечитаемый CAB из кеша: " + Path.GetFileName(cab));
+                            try { File.Delete(cab); } catch { }
+                        }
+                        log($"Преобразую языковой ESD в CAB ({i + 1}/{orderedEsdFiles.Length}): {Path.GetFileName(esd)}");
+                        progress?.Invoke(Math.Clamp(42 + (int)(20.0 * i / Math.Max(1, orderedEsdFiles.Length)), 42, 62));
                         await ConvertEsdToCabAsync(esd, cab, cacheRoot, converter, log, cancellationToken);
+                        if (!await VerifyCabPackageAsync(cab, cancellationToken))
+                        {
+                            try { File.Delete(cab); } catch { }
+                            throw new InvalidDataException("Созданный CAB не проходит проверку метаданных DISM: " + Path.GetFileName(cab));
+                        }
                         ready++;
                         if (IsFeaturePackageFile(cab)) fodReady++;
                     }
@@ -153,7 +188,7 @@ internal static class UupLanguagePackDownloader
                     .Any(IsCoreLanguagePackFile);
                 if (!readyCore)
                 {
-                    cacheOk = false;
+                    cacheOk = 0;
                     errors.Add($"Для выпуска {build.Build} не удалось подготовить основной CAB-пакет ru-RU.");
                     continue;
                 }
@@ -163,9 +198,12 @@ internal static class UupLanguagePackDownloader
                 if (allFeatureCabs == 0)
                     log("В наборе нет явно именованных Language Features CAB. OCR, речь и рукописный ввод потребуют дополнительного совместимого FOD-источника.");
 
+                try { await SaveCacheManifestAsync(cacheRoot, build, files, targetBuild, baseBuild, arch, log, cancellationToken); }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) { log("Не удалось записать манифест кеша; скачанные файлы остаются доступными: " + ex.Message); }
                 progress?.Invoke(65);
                 log($"Русский Language Pack готов. CAB в кеше: {Directory.EnumerateFiles(cacheRoot, "*.cab").Count()}; Language Features CAB: {allFeatureCabs}.");
-                if (!cacheOk)
+                if (cacheOk == 0)
                     log("Некоторые дополнительные пакеты не скачаны. Основной Language Pack имеется, но результат не будет гарантированно полным.");
 
                 return new AutoLanguagePackageSource(cacheRoot, targetBuild, baseBuild, arch,
@@ -179,11 +217,129 @@ internal static class UupLanguagePackDownloader
             }
         }
 
+        var cached = await TryUseVerifiedCacheAsync(cacheBase, targetBuild, baseBuild, arch, log, cancellationToken);
+        if (cached is not null) return cached;
         var detail = errors.Count == 0 ? "" : Environment.NewLine + string.Join(Environment.NewLine, errors.Take(5));
         throw new InvalidOperationException(
-            $"Не удалось автоматически подготовить совместимый русский Language Pack для базы {baseBuild}. " +
+            $"Не удалось автоматически подготовить совместимый русский Language Pack для базы {baseBuild}, и подтверждённого кеша нет. " +
             "Это бывает, если нужный выпуск отсутствует в UUP Dump, исходный ISO слишком старый или сервер не отдаёт языковые файлы. " +
             "Укажите официальный Language Pack ISO / Languages and Optional Features ISO вручную." + detail);
+    }
+
+    private static async Task SaveCacheManifestAsync(
+        string cacheRoot, UupBuild build, IReadOnlyCollection<UupFile> payloads, int targetBuild, int baseBuild, string architecture,
+        Action<string> log, CancellationToken cancellationToken)
+    {
+        var entries = new List<CacheManifestEntry>();
+        var payloadByName = payloads.ToDictionary(f => Path.GetFileName(f.Name), StringComparer.OrdinalIgnoreCase);
+        var allowedCabNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var payload in payloads)
+        {
+            var extension = Path.GetExtension(payload.Name);
+            if (extension.Equals(".cab", StringComparison.OrdinalIgnoreCase)) allowedCabNames.Add(Path.GetFileName(payload.Name));
+            else if (extension.Equals(".esd", StringComparison.OrdinalIgnoreCase)) allowedCabNames.Add(Path.ChangeExtension(Path.GetFileName(payload.Name), ".cab"));
+        }
+        foreach (var cab in Directory.EnumerateFiles(cacheRoot, "*.cab", SearchOption.TopDirectoryOnly))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var cabName = Path.GetFileName(cab);
+                if (!allowedCabNames.Contains(cabName)) continue;
+                var sourceName = payloadByName.ContainsKey(cabName) ? cabName : Path.ChangeExtension(cabName, ".esd");
+                if (!payloadByName.TryGetValue(sourceName, out var sourcePayload)) continue;
+                var sourcePath = Path.Combine(cacheRoot, sourceName);
+                if (!await VerifySha1Async(sourcePath, sourcePayload.Sha1, sourcePayload.Size, cancellationToken)) continue;
+                if (!await VerifyCabPackageAsync(cab, cancellationToken)) continue;
+                await using var stream = new FileStream(cab, FileMode.Open, FileAccess.Read, FileShare.Read,
+                    1024 * 256, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken));
+                entries.Add(new CacheManifestEntry(Path.GetFileName(cab), new FileInfo(cab).Length, hash));
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { log("Не включаю CAB в манифест кеша: " + Path.GetFileName(cab) + "; " + ex.Message); }
+        }
+
+        if (!entries.Any(e => IsCoreLanguagePackFile(e.Name)))
+        {
+            log("Манифест кеша не сохранён: DISM не подтвердил основной Language Pack CAB.");
+            return;
+        }
+
+        var manifest = new CacheManifest(1, build.Id, build.Build, targetBuild, baseBuild, architecture,
+            DateTimeOffset.UtcNow, entries.ToArray());
+        var json = JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true });
+        var path = Path.Combine(cacheRoot, "cache-manifest.json");
+        var temp = path + ".tmp";
+        await File.WriteAllTextAsync(temp, json, new System.Text.UTF8Encoding(false), cancellationToken);
+        File.Move(temp, path, true);
+        log($"Сохранён манифест локального кеша: подтверждённых CAB {entries.Count}.");
+    }
+
+    private static async Task<AutoLanguagePackageSource?> TryUseVerifiedCacheAsync(
+        string cacheBase, int targetBuild, int baseBuild, string architecture,
+        Action<string> log, CancellationToken cancellationToken)
+    {
+        string[] manifests;
+        try
+        {
+            manifests = Directory.GetFiles(cacheBase, "cache-manifest.json", SearchOption.AllDirectories)
+                .OrderByDescending(File.GetLastWriteTimeUtc).Take(40).ToArray();
+        }
+        catch { return null; }
+
+        foreach (var manifestPath in manifests)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var json = await File.ReadAllTextAsync(manifestPath, cancellationToken);
+                var manifest = JsonSerializer.Deserialize<CacheManifest>(json);
+                if (manifest is null || manifest.FormatVersion != 1 ||
+                    manifest.LanguagePackBaseBuild != baseBuild ||
+                    !NormalizeArchitecture(manifest.Architecture).Equals(architecture, StringComparison.OrdinalIgnoreCase) ||
+                    manifest.Files is null)
+                    continue;
+
+                var directory = Path.GetDirectoryName(manifestPath)!;
+                var verifiedCabCount = 0;
+                var verifiedFeatureCount = 0;
+                var verifiedCore = false;
+                foreach (var entry in manifest.Files)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (string.IsNullOrWhiteSpace(entry.Name) ||
+                        !Path.GetFileName(entry.Name).Equals(entry.Name, StringComparison.Ordinal) ||
+                        !entry.Name.EndsWith(".cab", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var cab = Path.Combine(directory, entry.Name);
+                    if (!File.Exists(cab) || (entry.Size > 0 && new FileInfo(cab).Length != entry.Size)) continue;
+                    await using var stream = new FileStream(cab, FileMode.Open, FileAccess.Read, FileShare.Read,
+                        1024 * 256, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                    var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken));
+                    if (!hash.Equals(entry.Sha256, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!await VerifyCabPackageAsync(cab, cancellationToken)) continue;
+
+                    verifiedCabCount++;
+                    if (IsFeaturePackageFile(cab)) verifiedFeatureCount++;
+                    if (IsCoreLanguagePackFile(cab)) verifiedCore = true;
+                }
+
+                if (!verifiedCore) continue;
+                log($"Сетевой поиск недоступен/не дал подходящий пакет. Использую подтверждённый локальный кеш {manifest.UupBuild}.");
+                return new AutoLanguagePackageSource(directory, targetBuild, baseBuild, architecture,
+                    verifiedCabCount, verifiedFeatureCount);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                log("Пропущен неподтверждённый манифест кеша " + Path.GetFileName(Path.GetDirectoryName(manifestPath)) + ": " + ex.Message);
+            }
+        }
+
+        log("Подтверждённый локальный кеш ru-RU для этой базы не найден.");
+        return null;
     }
 
     private static async Task<List<UupBuild>> FindBuildCandidatesAsync(
@@ -295,7 +451,7 @@ internal static class UupLanguagePackDownloader
                 !extension.Equals(".cab", StringComparison.OrdinalIgnoreCase))
                 continue;
             result.Add(new UupFile(name, GetString(property.Value, "sha1"),
-                GetLong(property.Value, "size"), downloadUrl));
+                GetLong(property.Value, "size"), downloadUrl, GetLong(property.Value, "expire")));
         }
 
         return result.OrderBy(f => IsCoreLanguagePackFile(f.Name) ? 0 :
@@ -351,32 +507,149 @@ internal static class UupLanguagePackDownloader
     }
 
     private static async Task DownloadAndVerifyFileAsync(
-        UupFile file, string destination, CancellationToken cancellationToken)
+        UupFile file, string destination, string buildId, Action<string> log, Action<long>? byteProgress, CancellationToken cancellationToken)
     {
         if (File.Exists(destination) && await VerifySha1Async(destination, file.Sha1, file.Size, cancellationToken))
+        {
+            log("  Кеш подтверждён: " + Path.GetFileName(destination));
+            if (file.Size > 0) byteProgress?.Invoke(file.Size);
             return;
-
-        if (File.Exists(destination)) File.Delete(destination);
-        var temp = destination + ".download-" + Guid.NewGuid().ToString("N");
-        try
-        {
-            using var response = await Client.GetAsync(file.Url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            response.EnsureSuccessStatusCode();
-            await using (var remote = await response.Content.ReadAsStreamAsync(cancellationToken))
-            await using (var local = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None,
-                             1024 * 256, FileOptions.Asynchronous | FileOptions.SequentialScan))
-                await remote.CopyToAsync(local, cancellationToken);
-
-            if (file.Size > 0 && new FileInfo(temp).Length != file.Size)
-                throw new InvalidDataException($"размер не совпадает с манифестом ({new FileInfo(temp).Length} / {file.Size} байт)");
-            if (!await VerifySha1Async(temp, file.Sha1, file.Size, cancellationToken))
-                throw new InvalidDataException("SHA-1 не совпадает с манифестом UUP Dump.");
-            File.Move(temp, destination, true);
         }
-        finally
+
+        var partial = destination + ".partial";
+        long locallyCreditedBytes = 0;
+        void ReportByteDelta(long delta)
         {
-            try { if (File.Exists(temp)) File.Delete(temp); } catch { }
+            if (delta == 0) return;
+            locallyCreditedBytes += delta;
+            byteProgress?.Invoke(delta);
         }
+        var current = file;
+        if (current.ExpiresAt > 0 && DateTimeOffset.FromUnixTimeSeconds(current.ExpiresAt) < DateTimeOffset.UtcNow.AddMinutes(2))
+            current = await RefreshFileUrlAsync(buildId, file.Name, cancellationToken);
+
+        for (var attempt = 1; attempt <= 5; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var offset = File.Exists(partial) ? new FileInfo(partial).Length : 0L;
+                ReportByteDelta(offset - locallyCreditedBytes);
+                if (file.Size > 0 && offset >= file.Size)
+                {
+                    if (offset == file.Size && await VerifySha1Async(partial, file.Sha1, file.Size, cancellationToken))
+                    {
+                        File.Move(partial, destination, true);
+                        return;
+                    }
+                    ReportByteDelta(-offset);
+                    File.Delete(partial);
+                    offset = 0;
+                }
+
+                using var request = new HttpRequestMessage(HttpMethod.Get, current.Url);
+                if (offset > 0)
+                    request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(offset, null);
+                using var response = await Client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+
+                if ((response.StatusCode == HttpStatusCode.Forbidden || response.StatusCode == HttpStatusCode.Unauthorized) && attempt < 5)
+                {
+                    current = await RefreshFileUrlAsync(buildId, file.Name, cancellationToken);
+                    await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), cancellationToken);
+                    continue;
+                }
+
+                if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable && offset > 0)
+                {
+                    ReportByteDelta(-offset);
+                    try { File.Delete(partial); } catch { }
+                    continue;
+                }
+
+                if ((int)response.StatusCode == 429 || (int)response.StatusCode >= 500)
+                {
+                    if (attempt == 5) response.EnsureSuccessStatusCode();
+                    var retryDelay = response.Headers.RetryAfter?.Delta ??
+                        (response.Headers.RetryAfter?.Date is DateTimeOffset retryAt ? retryAt - DateTimeOffset.UtcNow : TimeSpan.FromSeconds(Math.Pow(2, attempt - 1)));
+                    if (retryDelay < TimeSpan.Zero) retryDelay = TimeSpan.Zero;
+                    if (retryDelay > TimeSpan.FromSeconds(30)) retryDelay = TimeSpan.FromSeconds(30);
+                    log($"  Временный HTTP {((int)response.StatusCode)} для {Path.GetFileName(file.Name)}; повтор {attempt + 1}/5 через {retryDelay.TotalSeconds:0.#} c.");
+                    await Task.Delay(retryDelay, cancellationToken);
+                    continue;
+                }
+
+                response.EnsureSuccessStatusCode();
+                var append = offset > 0 && response.StatusCode == HttpStatusCode.PartialContent;
+                if (offset > 0 && !append)
+                {
+                    ReportByteDelta(-offset);
+                    try { File.Delete(partial); } catch { }
+                    offset = 0;
+                }
+                if (append && response.Content.Headers.ContentRange?.From is long rangeStart && rangeStart != offset)
+                {
+                    ReportByteDelta(-offset);
+                    try { File.Delete(partial); } catch { }
+                    log("  Сервер вернул несовпадающий Content-Range; часть будет скачана заново.");
+                    continue;
+                }
+
+                await using (var remote = await response.Content.ReadAsStreamAsync(cancellationToken))
+                await using (var local = new FileStream(partial, append ? FileMode.Append : FileMode.Create,
+                                 FileAccess.Write, FileShare.None, 1024 * 256,
+                                 FileOptions.Asynchronous | FileOptions.SequentialScan))
+                {
+                    var buffer = new byte[1024 * 256];
+                    while (true)
+                    {
+                        var read = await remote.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+                        if (read <= 0) break;
+                        await local.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                        ReportByteDelta(read);
+                    }
+                    await local.FlushAsync(cancellationToken);
+                }
+
+                var actualSize = new FileInfo(partial).Length;
+                if (file.Size > 0 && actualSize != file.Size)
+                {
+                    if (actualSize > file.Size)
+                    {
+                        ReportByteDelta(-actualSize);
+                        try { File.Delete(partial); } catch { }
+                    }
+                    throw new InvalidDataException($"размер пока не совпадает с манифестом ({actualSize} / {file.Size} байт); сохранённая часть будет использована для продолжения");
+                }
+
+                if (!await VerifySha1Async(partial, file.Sha1, file.Size, cancellationToken))
+                {
+                    ReportByteDelta(-actualSize);
+                    try { File.Delete(partial); } catch { }
+                    throw new InvalidDataException("SHA-1 не совпадает с манифестом UUP Dump; временный файл удалён.");
+                }
+                File.Move(partial, destination, true);
+                return;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) when (attempt < 5)
+            {
+                log($"  Ошибка загрузки {Path.GetFileName(file.Name)} ({attempt}/5): {ex.Message}. Повтор с паузой.");
+                await Task.Delay(TimeSpan.FromSeconds(Math.Min(16, Math.Pow(2, attempt - 1))), cancellationToken);
+                if (attempt == 2 || attempt == 4)
+                {
+                    try { current = await RefreshFileUrlAsync(buildId, file.Name, cancellationToken); } catch { }
+                }
+            }
+        }
+
+        throw new IOException($"Не удалось скачать и проверить {Path.GetFileName(file.Name)} после 5 попыток.");
+    }
+
+    private static async Task<UupFile> RefreshFileUrlAsync(string buildId, string fileName, CancellationToken cancellationToken)
+    {
+        var refreshed = await GetRussianLanguageFilesAsync(buildId, cancellationToken);
+        var item = refreshed.FirstOrDefault(f => f.Name.Equals(fileName, StringComparison.OrdinalIgnoreCase));
+        return item ?? throw new InvalidOperationException("UUP Dump не вернул обновлённую ссылку для " + fileName);
     }
 
     private static async Task<bool> VerifySha1Async(
@@ -389,6 +662,24 @@ internal static class UupLanguagePackDownloader
             1024 * 256, FileOptions.Asynchronous | FileOptions.SequentialScan);
         var hash = await SHA1.HashDataAsync(stream, cancellationToken);
         return Convert.ToHexString(hash).Equals(expectedSha1, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<bool> VerifyCabPackageAsync(string cabPath, CancellationToken cancellationToken)
+    {
+        if (!File.Exists(cabPath) || new FileInfo(cabPath).Length < 1024) return false;
+        var dism = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "dism.exe");
+        if (!File.Exists(dism)) return false;
+        try
+        {
+            var result = await RunProcessAsync(dism,
+                new[] { "/English", "/Get-PackageInfo", "/PackagePath:" + cabPath },
+                Environment.CurrentDirectory, cancellationToken);
+            return result.ExitCode == 0 &&
+                (result.Output.Contains("Package Identity", StringComparison.OrdinalIgnoreCase) ||
+                 result.Output.Contains("Identity", StringComparison.OrdinalIgnoreCase));
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { return false; }
     }
 
     private sealed record ConverterTools(string Root, string ImageX, string SxsExpand, string CabArc);
@@ -537,8 +828,34 @@ internal static class UupLanguagePackDownloader
 
     private static async Task<JsonDocument> GetJsonAsync(string url, CancellationToken cancellationToken)
     {
-        using var response = await Client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        HttpResponseMessage? response = null;
+        for (var attempt = 1; attempt <= 5; attempt++)
+        {
+            response?.Dispose();
+            try
+            {
+                response = await Client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                var status = (int)response.StatusCode;
+                if (status == 429 || status is 500 or 502 or 503 or 504)
+                {
+                    if (attempt == 5) response.EnsureSuccessStatusCode();
+                    var delay = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(Math.Pow(2, attempt - 1));
+                    if (delay < TimeSpan.Zero) delay = TimeSpan.Zero;
+                    if (delay > TimeSpan.FromSeconds(30)) delay = TimeSpan.FromSeconds(30);
+                    await Task.Delay(delay, cancellationToken);
+                    continue;
+                }
+                response.EnsureSuccessStatusCode();
+                break;
+            }
+            catch (HttpRequestException) when (attempt < 5)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt - 1)), cancellationToken);
+            }
+        }
+        if (response is null) throw new HttpRequestException("Не удалось связаться с UUP Dump API после повторных попыток.");
+        using (response)
+        {
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         var doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
         if (doc.RootElement.TryGetProperty("response", out var res) &&
@@ -549,12 +866,16 @@ internal static class UupLanguagePackDownloader
             throw new InvalidOperationException("UUP Dump API: " + message);
         }
         return doc;
+        }
     }
 
     private static int GetLanguagePackBaseBuild(int targetBuild)
     {
         if (targetBuild is >= 19041 and <= 19045) return 19041;
         if (targetBuild is 22621 or 22631) return 22621;
+        // Windows 11 24H2, 25H2 and 26H2 use a shared servicing branch.
+        // 26H1 (build 28000) is intentionally not mapped to this baseline.
+        if (targetBuild is 26100 or 26200 or 26300) return 26100;
         return targetBuild;
     }
 
