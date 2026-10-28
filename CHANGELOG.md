@@ -2,6 +2,24 @@
 
 All notable changes to Localizer-IoT are documented here.
 
+## [0.9.0.1] — 2026-10-29
+
+### UI and accessibility
+- Replaced the crowded one-page form with a guided workspace: separate tabs for the source image/output, language sources, settings/profiles, and the live log.
+- Added a dark branded header with version badge, clearer section headings, consistent button styles, responsive source pickers, and concise help text for each operation.
+- Kept the primary "Create localized ISO" action, current stage, progress bar, and cancel-download action in a persistent footer.
+- Added live source summaries for the selected ISO and optional language sources, progress percentage text, and colored status feedback for errors and warnings.
+- Added log copy/save/clear actions and a profile-based workflow for reusable settings.
+- Enabled per-monitor DPI awareness in the application manifest and adjusted layout defaults for high-DPI Windows desktops.
+
+### Preserved behavior
+- Retained all source-selection, drag-and-drop, automatic RU discovery/download, ISO donor inspection, manual CAB list, JSON profile save/load, and offline ZIP bundle functions.
+- Windows Update remains disabled by default and can only be enabled for missing language FOD capabilities; general Windows updates are never integrated.
+- The original ISO remains unchanged and the UI reminds users to test the output in a virtual machine before deployment.
+
+### Validation notes
+- This is a UI-focused alpha patch. The build pipeline verifies compilation and self-contained Windows x64 publishing; full servicing of the specific Windows IoT Enterprise LTSC 2024 ISO still requires end-to-end testing in a Windows VM.
+
 ## [0.9.0.0] — 2026-10-29
 
 ### Added
