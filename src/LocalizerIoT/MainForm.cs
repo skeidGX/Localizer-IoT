@@ -415,7 +415,7 @@ public sealed class MainForm : Form
             Dock = DockStyle.Top,
             AutoSize = true,
             ColumnCount = 1,
-            RowCount = 5,
+            RowCount = 4,
             Padding = new Padding(0, 2, 0, 2),
             GrowStyle = TableLayoutPanelGrowStyle.AddRows
         };
@@ -563,6 +563,7 @@ public sealed class MainForm : Form
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         for (var row = 0; row < 3; row++) footer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         _status.AutoSize = false;
+        _status.Height = 30;
         _status.Dock = DockStyle.Fill;
         _status.AutoEllipsis = true;
         _status.TextAlign = ContentAlignment.MiddleLeft;
