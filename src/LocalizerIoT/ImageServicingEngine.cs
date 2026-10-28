@@ -202,7 +202,7 @@ internal static class ImageServicingEngine
                     ApplyCabPackages(dism, mountDir, windowsPackages, report, progress, 25, 40);
                     TryAddLanguageCapabilities(dism, mountDir, packages.ToArray(), capabilitySources, warnings, report, progress);
                     SetRussianDefaults(dism, mountDir, warnings, report, progress);
-                    TryServiceWinRe(dism, mountDir, work, packageRoots, warnings, report, progress);
+                    TryServiceWinRe(dism, mountDir, work, windowsPackages, packages.ToArray(), capabilitySources, warnings, report, progress);
                     var langIni = Run(dism, "/Image:" + mountDir, "/Gen-LangINI", "/Distribution:" + stage);
                     if (langIni.ExitCode != 0) AddWarning(warnings, "DISM /Gen-LangINI не сработал: " + ShortOutput(langIni.Output));
                     var unmount = Run(dism, "/Unmount-Image", "/MountDir:" + mountDir, "/Commit", "/CheckIntegrity");
@@ -392,8 +392,8 @@ internal static class ImageServicingEngine
         if (r.ExitCode != 0) AddWarning(warnings, $"Не удалось применить {setting}: {ShortOutput(r.Output)}");
     }
 
-    private static void TryServiceWinRe(string dism, string windowsMount, string work, List<string> packageRoots,
-        List<string> warnings, Action<int, string> report, int progress)
+    private static void TryServiceWinRe(string dism, string windowsMount, string work, string[] windowsPackages,
+        string[] allLanguagePackages, string[] capabilitySources, List<string> warnings, Action<int, string> report, int progress)
     {
         var winre = Path.Combine(windowsMount, "Windows", "System32", "Recovery", "winre.wim");
         if (!File.Exists(winre))
@@ -401,10 +401,10 @@ internal static class ImageServicingEngine
             report(progress + 5, "WinRE не найден внутри этого индекса; пропускаю встроенную среду восстановления.");
             return;
         }
-        var winpeRoot = FindWinPePackageRoot(packageRoots);
-        if (winpeRoot is null)
+        var languagePacks = windowsPackages.Where(IsCoreLanguagePack).ToArray();
+        if (languagePacks.Length == 0)
         {
-            AddWarning(warnings, "WinRE найден, но WinPE language optional components ru-RU отсутствуют в выбранном Language/FoD media; WinRE не локализован.");
+            AddWarning(warnings, "WinRE найден, но основной русский Language Pack не обнаружен; WinRE не локализован.");
             return;
         }
         var winreCopy = Path.Combine(work, "winre-copy-" + Guid.NewGuid().ToString("N") + ".wim");
@@ -417,20 +417,20 @@ internal static class ImageServicingEngine
             var mount = Run(dism, "/Mount-Image", "/ImageFile:" + winreCopy, "/Index:1", "/MountDir:" + winreMount, "/CheckIntegrity");
             if (mount.ExitCode != 0) throw new InvalidOperationException(ShortOutput(mount.Output));
             isMounted = true;
-            var candidates = GetWinPeCabs(winpeRoot).Where(p => Path.GetFileName(p).Equals("lp.cab", StringComparison.OrdinalIgnoreCase) ||
-                Path.GetFileName(p).StartsWith("WinPE-", StringComparison.OrdinalIgnoreCase)).ToArray();
-            foreach (var cab in candidates)
+            foreach (var cab in languagePacks)
             {
                 var add = Run(dism, "/Image:" + winreMount, "/Add-Package", "/PackagePath:" + cab);
-                if (add.ExitCode != 0) AddWarning(warnings, $"WinRE пропустил {Path.GetFileName(cab)}: {ShortOutput(add.Output)}");
+                if (add.ExitCode != 0)
+                    throw new InvalidOperationException($"Не удалось добавить русский Language Pack в WinRE ({Path.GetFileName(cab)}): {ShortOutput(add.Output)}");
             }
+            TryAddLanguageCapabilities(dism, winreMount, allLanguagePackages, capabilitySources, warnings, report, progress + 2);
             var intl = Run(dism, "/Image:" + winreMount, "/Set-AllIntl:ru-RU");
             if (intl.ExitCode != 0) AddWarning(warnings, "Не удалось настроить locale ru-RU в WinRE: " + ShortOutput(intl.Output));
             var commit = Run(dism, "/Unmount-Image", "/MountDir:" + winreMount, "/Commit", "/CheckIntegrity");
             EnsureSuccess(commit, "Не удалось зафиксировать локализацию WinRE.");
             isMounted = false;
             File.Copy(winreCopy, winre, true);
-            report(progress + 6, "WinRE обработан (по применимости доступных WinPE OCs).");
+            report(progress + 6, "WinRE обработан. Проверьте предупреждения о недостающих language FOD.");
         }
         catch (Exception ex)
         {
@@ -495,13 +495,8 @@ internal static class ImageServicingEngine
                     if (add.ExitCode != 0)
                         throw new InvalidOperationException($"Не применён обязательный WinPE пакет {Path.GetFileName(cab)}: {ShortOutput(add.Output)}");
                 }
-                foreach (var cab in winpePackages.Where(p => Path.GetFileName(p).StartsWith("WinPE-", StringComparison.OrdinalIgnoreCase) &&
-                    !Path.GetFileName(p).Contains("WinPE-Setup_ru-ru", StringComparison.OrdinalIgnoreCase) &&
-                    !Path.GetFileName(p).Contains("WinPE-Setup-Client_ru-ru", StringComparison.OrdinalIgnoreCase)))
-                {
-                    var add = Run(dism, "/Image:" + mountDir, "/Add-Package", "/PackagePath:" + cab);
-                    if (add.ExitCode != 0) AddWarning(warnings, $"WinPE index {index}: необязательный {Path.GetFileName(cab)} не добавлен: {ShortOutput(add.Output)}");
-                }
+                // Add only the required language packs to boot.wim. Other WinPE optional components should
+                // only be localized when their neutral packages are present and the component is installed.
                 var intl = Run(dism, "/Image:" + mountDir, "/Set-AllIntl:ru-RU");
                 if (intl.ExitCode != 0) AddWarning(warnings, "Не удалось установить locale ru-RU в boot.wim: " + ShortOutput(intl.Output));
                 if (setupIndex)
