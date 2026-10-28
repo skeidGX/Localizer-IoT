@@ -25,7 +25,7 @@ public sealed class MainForm : Form
     private readonly Button _saveProfile = new() { Text = "Сохранить профиль…", AutoSize = true };
     private readonly Button _loadProfile = new() { Text = "Загрузить профиль…", AutoSize = true };
     private readonly Button _exportBundle = new() { Text = "Экспорт офлайн-пакета…", AutoSize = true };
-    private readonly CheckBox _useWindowsUpdateForCapabilities = new() { Text = "Разрешить Windows Update только для недостающих языковых FOD (не обновляет ОС)", AutoSize = true, Checked = false };
+    private readonly CheckBox _useWindowsUpdateForCapabilities = new() { Text = "Разрешить Windows Update только для FOD установленной Windows (не WinRE/обновления ОС)", AutoSize = true, Checked = false };
     private CancellationTokenSource? _operationCts;
     private readonly ProgressBar _progress = new() { Width = 240, Minimum = 0, Maximum = 100 };
     private readonly TextBox _log = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Font = new Font("Consolas", 9) };
