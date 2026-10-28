@@ -454,7 +454,7 @@ internal static class ImageServicingEngine
             reportText.AppendLine("Russian donor media: " + (string.IsNullOrWhiteSpace(request.RussianDonorMedia) ? "(not specified)" : request.RussianDonorMedia));
             reportText.AppendLine("Architecture: " + architecture);
             reportText.AppendLine("Image indexes serviced: " + string.Join(", ", installIndices));
-            reportText.AppendLine("Windows Update for language capabilities only: " + (request.AllowWindowsUpdateForCapabilities ? "enabled by user" : "disabled"));
+            reportText.AppendLine("Windows Update for language capabilities on install image only (never WinRE/OS updates): " + (request.AllowWindowsUpdateForCapabilities ? "enabled by user" : "disabled"));
             reportText.AppendLine("Windows OS updates integrated: no");
             reportText.AppendLine("Language packages:");
             foreach (var package in windowsPackages) reportText.AppendLine("  " + package);
@@ -855,7 +855,7 @@ internal static class ImageServicingEngine
             if (!match.Success) continue;
             var component = match.Groups[1].Value;
             if (component.EndsWith("-Package", StringComparison.OrdinalIgnoreCase))
-                component = component[..^"-Package".Length];
+                component = component.Substring(0, component.Length - "-Package".Length);
             if (component.Equals("WinPE-WiFi", StringComparison.OrdinalIgnoreCase)) continue;
             components.Add(component);
         }
