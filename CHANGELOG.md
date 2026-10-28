@@ -2,6 +2,22 @@
 
 All notable changes to Localizer-IoT are documented here.
 
+## [0.1.0.1] — 2026-10-29
+
+### Added
+- Added a dedicated optional Russian ISO-donor/media field supporting an ISO or extracted Windows media folder.
+- Added a "Проверить донор" diagnostic that reads the donor image's first-index version/architecture, checks for `sources\\ru-ru`, and counts separate ru-RU Language Pack, language FOD, and WinPE CAB candidates.
+- Added donor media to language-package/FOD/Setup-resource discovery while preserving the donor ISO and the original target ISO unchanged.
+- Extended the WinPE preflight scan to accept donor ISO files as sources, not only already-extracted folders.
+- Set the application file/product version to Alpha 0.1.0.1 and updated the release workflow to publish four-part version tags such as `v0.1.0.1`.
+
+### Compatibility and safety
+- Donor Setup resources are copied only when the servicing baseline and architecture pass the existing compatibility checks; language CAB packages are still validated by DISM before application.
+- The program does not synthesize a Language Pack CAB from an already-localized `install.wim` or the installed component store. If the donor media has no independent core Language Pack CAB, a compatible official Language Pack source is still required.
+- UUP Dump remains an optional best-effort source. The donor ISO may contain Setup resources without containing the standalone Language Pack or every FOD/WinPE package.
+- The executable build pipeline has passed, but end-to-end servicing of the exact user ISO and VM boot testing have not yet been completed. This remains an alpha preview.
+
+
 ## [0.1.0-alpha.2] — 2026-10-28
 
 ### Fixed
