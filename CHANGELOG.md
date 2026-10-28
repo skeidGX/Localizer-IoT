@@ -7,6 +7,8 @@ All notable changes to Localizer-IoT are documented here.
 ### Added
 - Added JSON save/load profiles for source paths, explicit CAB list, output path, selected image indexes, and the opt-in language-capability Windows Update setting.
 - Added offline ZIP export for matching Russian Language Pack/FOD/WinPE CAB files and Setup `sources\\ru-ru` resources already present in selected extracted folders. The archive includes a per-file SHA-256 manifest and excludes likely OS update packages.
+- Changed WinRE servicing to require recovery language resources from a suitable language/optional-features source; it now pairs WinRE `lp.cab` and language CABs only with optional components present in the recovery image and does not substitute the installed Windows language pack or ADK media.
+- Added a skip for language package identities already reported as installed by DISM, avoiding redundant `/Add-Package` operations across repeated servicing.
 - Added local SHA-256 cache manifests for DISM-readable CAB payloads and fallback to a matching verified cache if online UUP discovery/download cannot provide a usable package.
 - Added up to three parallel UUP payload transfers, retry/backoff for temporary network/API failures, HTTP Range continuation for partial payloads, and refreshed payload URLs after expiry/authorization errors.
 - Added a visible cancellation action for UUP discovery/download; verified cache entries are reused and incomplete `.partial` downloads are retained for possible resumption.
