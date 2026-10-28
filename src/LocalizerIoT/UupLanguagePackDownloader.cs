@@ -31,6 +31,9 @@ internal static class UupLanguagePackDownloader
 
     private sealed record UupBuild(string Id, string Build, string Architecture, string Title, long Created);
     private sealed record UupFile(string Name, string Sha1, long Size, string Url, long ExpiresAt);
+    private sealed record CacheManifest(int FormatVersion, string UupId, string UupBuild, int TargetBuild,
+        int LanguagePackBaseBuild, string Architecture, DateTimeOffset CreatedAt, CacheManifestEntry[] Files);
+    private sealed record CacheManifestEntry(string Name, long Size, string Sha256);
 
     private static HttpClient CreateClient()
     {
@@ -60,16 +63,20 @@ internal static class UupLanguagePackDownloader
         log($"Образ: {image.Name}; версия {image.Version}; сборка {targetBuild}; архитектура {arch}. Ищу ru-RU на базе {baseBuild}.");
         progress?.Invoke(3);
 
-        var builds = await FindBuildCandidatesAsync(targetBuild, baseBuild, arch, log, cancellationToken);
-        if (builds.Count == 0)
-            throw new InvalidOperationException(
-                $"UUP Dump не вернул подходящий выпуск для базы {baseBuild} и архитектуры {arch}. " +
-                "Автоматический подбор недоступен для этой версии; укажите совместимый официальный Language Pack ISO или папку с CAB.");
-
         var cacheBase = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Localizer-IoT", "Cache", "ru-RU", $"{baseBuild}-{arch}");
         Directory.CreateDirectory(cacheBase);
+
+        var builds = await FindBuildCandidatesAsync(targetBuild, baseBuild, arch, log, cancellationToken);
+        if (builds.Count == 0)
+        {
+            var offline = await TryUseVerifiedCacheAsync(cacheBase, targetBuild, baseBuild, arch, log, cancellationToken);
+            if (offline is not null) return offline;
+            throw new InvalidOperationException(
+                $"UUP Dump не вернул подходящий выпуск для базы {baseBuild} и архитектуры {arch}, а в локальном кеше нет подтверждённого Language Pack. " +
+                "Проверьте интернет или укажите совместимый официальный Language Pack ISO/папку с CAB.");
+        }
 
         var errors = new List<string>();
         foreach (var build in builds)
@@ -191,6 +198,7 @@ internal static class UupLanguagePackDownloader
                 if (allFeatureCabs == 0)
                     log("В наборе нет явно именованных Language Features CAB. OCR, речь и рукописный ввод потребуют дополнительного совместимого FOD-источника.");
 
+                await SaveCacheManifestAsync(cacheRoot, build, targetBuild, baseBuild, arch, log, cancellationToken);
                 progress?.Invoke(65);
                 log($"Русский Language Pack готов. CAB в кеше: {Directory.EnumerateFiles(cacheRoot, "*.cab").Count()}; Language Features CAB: {allFeatureCabs}.");
                 if (cacheOk == 0)
@@ -207,11 +215,115 @@ internal static class UupLanguagePackDownloader
             }
         }
 
+        var cached = await TryUseVerifiedCacheAsync(cacheBase, targetBuild, baseBuild, arch, log, cancellationToken);
+        if (cached is not null) return cached;
         var detail = errors.Count == 0 ? "" : Environment.NewLine + string.Join(Environment.NewLine, errors.Take(5));
         throw new InvalidOperationException(
-            $"Не удалось автоматически подготовить совместимый русский Language Pack для базы {baseBuild}. " +
+            $"Не удалось автоматически подготовить совместимый русский Language Pack для базы {baseBuild}, и подтверждённого кеша нет. " +
             "Это бывает, если нужный выпуск отсутствует в UUP Dump, исходный ISO слишком старый или сервер не отдаёт языковые файлы. " +
             "Укажите официальный Language Pack ISO / Languages and Optional Features ISO вручную." + detail);
+    }
+
+    private static async Task SaveCacheManifestAsync(
+        string cacheRoot, UupBuild build, int targetBuild, int baseBuild, string architecture,
+        Action<string> log, CancellationToken cancellationToken)
+    {
+        var entries = new List<CacheManifestEntry>();
+        foreach (var cab in Directory.EnumerateFiles(cacheRoot, "*.cab", SearchOption.TopDirectoryOnly))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                if (!await VerifyCabPackageAsync(cab, cancellationToken)) continue;
+                await using var stream = new FileStream(cab, FileMode.Open, FileAccess.Read, FileShare.Read,
+                    1024 * 256, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken));
+                entries.Add(new CacheManifestEntry(Path.GetFileName(cab), new FileInfo(cab).Length, hash));
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { log("Не включаю CAB в манифест кеша: " + Path.GetFileName(cab) + "; " + ex.Message); }
+        }
+
+        if (!entries.Any(e => IsCoreLanguagePackFile(e.Name)))
+        {
+            log("Манифест кеша не сохранён: DISM не подтвердил основной Language Pack CAB.");
+            return;
+        }
+
+        var manifest = new CacheManifest(1, build.Id, build.Build, targetBuild, baseBuild, architecture,
+            DateTimeOffset.UtcNow, entries.ToArray());
+        var json = JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true });
+        var path = Path.Combine(cacheRoot, "cache-manifest.json");
+        var temp = path + ".tmp";
+        await File.WriteAllTextAsync(temp, json, new System.Text.UTF8Encoding(false), cancellationToken);
+        File.Move(temp, path, true);
+        log($"Сохранён манифест локального кеша: подтверждённых CAB {entries.Count}.");
+    }
+
+    private static async Task<AutoLanguagePackageSource?> TryUseVerifiedCacheAsync(
+        string cacheBase, int targetBuild, int baseBuild, string architecture,
+        Action<string> log, CancellationToken cancellationToken)
+    {
+        string[] manifests;
+        try
+        {
+            manifests = Directory.GetFiles(cacheBase, "cache-manifest.json", SearchOption.AllDirectories)
+                .OrderByDescending(File.GetLastWriteTimeUtc).Take(40).ToArray();
+        }
+        catch { return null; }
+
+        foreach (var manifestPath in manifests)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var json = await File.ReadAllTextAsync(manifestPath, cancellationToken);
+                var manifest = JsonSerializer.Deserialize<CacheManifest>(json);
+                if (manifest is null || manifest.FormatVersion != 1 ||
+                    manifest.LanguagePackBaseBuild != baseBuild ||
+                    !NormalizeArchitecture(manifest.Architecture).Equals(architecture, StringComparison.OrdinalIgnoreCase) ||
+                    manifest.Files is null)
+                    continue;
+
+                var directory = Path.GetDirectoryName(manifestPath)!;
+                var verifiedCabCount = 0;
+                var verifiedFeatureCount = 0;
+                var verifiedCore = false;
+                foreach (var entry in manifest.Files)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (string.IsNullOrWhiteSpace(entry.Name) ||
+                        !Path.GetFileName(entry.Name).Equals(entry.Name, StringComparison.Ordinal) ||
+                        !entry.Name.EndsWith(".cab", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var cab = Path.Combine(directory, entry.Name);
+                    if (!File.Exists(cab) || (entry.Size > 0 && new FileInfo(cab).Length != entry.Size)) continue;
+                    await using var stream = new FileStream(cab, FileMode.Open, FileAccess.Read, FileShare.Read,
+                        1024 * 256, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                    var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken));
+                    if (!hash.Equals(entry.Sha256, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!await VerifyCabPackageAsync(cab, cancellationToken)) continue;
+
+                    verifiedCabCount++;
+                    if (IsFeaturePackageFile(cab)) verifiedFeatureCount++;
+                    if (IsCoreLanguagePackFile(cab)) verifiedCore = true;
+                }
+
+                if (!verifiedCore) continue;
+                log($"Сетевой поиск недоступен/не дал подходящий пакет. Использую подтверждённый локальный кеш {manifest.UupBuild}.");
+                return new AutoLanguagePackageSource(directory, targetBuild, baseBuild, architecture,
+                    verifiedCabCount, verifiedFeatureCount);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                log("Пропущен неподтверждённый манифест кеша " + Path.GetFileName(Path.GetDirectoryName(manifestPath)) + ": " + ex.Message);
+            }
+        }
+
+        log("Подтверждённый локальный кеш ru-RU для этой базы не найден.");
+        return null;
     }
 
     private static async Task<List<UupBuild>> FindBuildCandidatesAsync(
