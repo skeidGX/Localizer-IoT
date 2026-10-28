@@ -9,11 +9,13 @@ public sealed class MainForm : Form
     private readonly TextBox _packageSource = new() { Dock = DockStyle.Fill, AllowDrop = true };
     private readonly TextBox _fodSource = new() { Dock = DockStyle.Fill, AllowDrop = true };
     private readonly TextBox _setupSource = new() { Dock = DockStyle.Fill, AllowDrop = true };
+    private readonly TextBox _donorSource = new() { Dock = DockStyle.Fill, AllowDrop = true };
     private readonly TextBox _packages = new() { Dock = DockStyle.Fill, Multiline = true, ScrollBars = ScrollBars.Vertical };
     private readonly TextBox _output = new() { Dock = DockStyle.Fill };
     private readonly NumericUpDown _index = new() { Minimum = 1, Maximum = 999, Value = 1, Width = 82 };
     private readonly CheckBox _allIndexes = new() { Text = "Обработать все редакции", Checked = true, AutoSize = true };
     private readonly Button _inspect = new() { Text = "Проверить ISO", AutoSize = true };
+    private readonly Button _inspectDonor = new() { Text = "Проверить донор", AutoSize = true };
     private readonly Button _autoDownload = new() { Text = "Автоматически скачать RU", AutoSize = true };
     private readonly Button _browseCab = new() { Text = "Добавить CAB…", AutoSize = true };
     private readonly Button _run = new() { Text = "Создать русифицированный ISO", AutoSize = true };
@@ -50,6 +52,16 @@ public sealed class MainForm : Form
                 if (cabs.Length > 0) AddCabFiles(cabs);
             }
         };
+        _donorSource.DragEnter += OnDragEnter;
+        _donorSource.DragDrop += (_, e) =>
+        {
+            if (e.Data?.GetData(DataFormats.FileDrop) is string[] files)
+            {
+                var candidate = files.FirstOrDefault(p => Directory.Exists(p) ||
+                    (File.Exists(p) && Path.GetExtension(p).Equals(".iso", StringComparison.OrdinalIgnoreCase)));
+                if (candidate is not null) _donorSource.Text = candidate;
+            }
+        };
         _setupSource.DragEnter += OnDragEnter;
         _setupSource.DragDrop += (_, e) =>
         {
@@ -61,6 +73,7 @@ public sealed class MainForm : Form
             }
         };
         _inspect.Click += async (_, _) => await InspectIsoAsync();
+        _inspectDonor.Click += async (_, _) => await InspectRussianDonorAsync();
         _autoDownload.Click += async (_, _) => await AutoDownloadRussianPackagesAsync();
         _browseCab.Click += (_, _) => SelectCabFiles();
         _run.Click += async (_, _) => await RunLocalizationAsync();
@@ -69,11 +82,13 @@ public sealed class MainForm : Form
         Log("Укажите отдельно Language Pack ISO и Languages and Optional Features ISO, если в поставке это разные носители.");
         Log("Все языковые и FOD источники должны соответствовать версии, базовой сборке и архитектуре целевого образа.");
         Log("Автоподбор RU использует UUP Dump JSON API и проверяет целостность файлов. Автоматическая доступность FOD и Setup/WinPE зависит от выпуска Windows.");
+        Log("Русский ISO-донор можно указать отдельно: программа проверит его CAB-пакеты ru-RU и resources sources\\ru-ru без изменения исходных файлов.");
     }
 
     private void BuildLayout()
     {
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 9 };
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 10 };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -172,6 +187,31 @@ public sealed class MainForm : Form
         setupPanel.Controls.Add(pickSetupIso, 2, 0);
         setupPanel.Controls.Add(pickSetupFolder, 3, 0);
         root.Controls.Add(setupPanel);
+
+        var donorPanel = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 5, AutoSize = true };
+        donorPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        donorPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        donorPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        donorPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        donorPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        donorPanel.Controls.Add(new Label { Text = "Русский ISO-донор (опционально):", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
+        donorPanel.Controls.Add(_donorSource, 1, 0);
+        var pickDonorIso = new Button { Text = "ISO…", AutoSize = true };
+        pickDonorIso.Click += (_, _) =>
+        {
+            using var d = new OpenFileDialog { Filter = "ISO-образы (*.iso)|*.iso", Title = "Выберите русский ISO-донор Windows 11 Enterprise LTSC 2024 или совместимого выпуска" };
+            if (d.ShowDialog(this) == DialogResult.OK) _donorSource.Text = d.FileName;
+        };
+        var pickDonorFolder = new Button { Text = "Папка…", AutoSize = true };
+        pickDonorFolder.Click += (_, _) =>
+        {
+            using var d = new FolderBrowserDialog { Description = "Выберите распакованный русский Windows media с sources\\install.wim/esd, sources\\ru-ru и языковыми CAB, если они присутствуют" };
+            if (d.ShowDialog(this) == DialogResult.OK) _donorSource.Text = d.SelectedPath;
+        };
+        donorPanel.Controls.Add(pickDonorIso, 2, 0);
+        donorPanel.Controls.Add(pickDonorFolder, 3, 0);
+        donorPanel.Controls.Add(_inspectDonor, 4, 0);
+        root.Controls.Add(donorPanel);
 
         var packagePanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2 };
         packagePanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -292,6 +332,30 @@ public sealed class MainForm : Form
         finally { SetBusy(false); }
     }
 
+    private async Task InspectRussianDonorAsync()
+    {
+        var path = _donorSource.Text.Trim();
+        if (!IsValidMediaPath(path) || string.IsNullOrWhiteSpace(path))
+        {
+            MessageBox.Show(this, "Выберите русский ISO-донор или папку с распакованными файлами Windows.",
+                "ISO-донор не выбран", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        SetBusy(true);
+        try
+        {
+            await Task.Run(() => ImageServicingEngine.InspectRussianDonor(path, Log));
+            Log("Проверка русского ISO-донора завершена.");
+        }
+        catch (Exception ex)
+        {
+            Log("Проверка русского ISO-донора не завершена: " + ex.Message);
+            MessageBox.Show(this, ex.Message, "Не удалось проверить ISO-донор", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        finally { SetBusy(false); }
+    }
+
     private async Task AutoDownloadRussianPackagesAsync()
     {
         if (!ValidateIso()) return;
@@ -348,18 +412,23 @@ public sealed class MainForm : Form
             MessageBox.Show(this, "Источник ресурсов Setup должен быть существующей папкой или ISO-файлом.");
             return;
         }
+        if (!IsValidMediaPath(_donorSource.Text))
+        {
+            MessageBox.Show(this, "Русский ISO-донор должен быть существующей папкой или ISO-файлом.");
+            return;
+        }
         if (File.Exists(output) && MessageBox.Show(this, "Выходной ISO уже существует. Перезаписать?", "Подтверждение",
             MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
 
         var cabFiles = _packages.Text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
             .Select(s => s.Trim()).Where(File.Exists).ToArray();
-        if (string.IsNullOrWhiteSpace(_packageSource.Text) && cabFiles.Length == 0)
+        if (string.IsNullOrWhiteSpace(_packageSource.Text) && string.IsNullOrWhiteSpace(_donorSource.Text) && cabFiles.Length == 0)
         {
             SetBusy(true);
             _progress.Value = 0;
             try
             {
-                Log("Источник Language Pack не задан — запускаю автоматический поиск и скачивание ru-RU.");
+                Log("Не задан источник Language Pack или русский ISO-донор — запускаю автоматический поиск и скачивание ru-RU.");
                 var result = await UupLanguagePackDownloader.DownloadRussianPackagesAsync(
                     _iso.Text.Trim(), Log, p => Ui(() => _progress.Value = Math.Clamp(p, 0, 100)));
                 _packageSource.Text = result.Directory;
@@ -378,7 +447,7 @@ public sealed class MainForm : Form
         }
 
         var hasOscdimg = ImageServicingEngine.FindOscdimgPath() is not null;
-        var extraWinPeRoots = new[] { _packageSource.Text.Trim(), _fodSource.Text.Trim(), _setupSource.Text.Trim() }
+        var extraWinPeRoots = new[] { _packageSource.Text.Trim(), _fodSource.Text.Trim(), _setupSource.Text.Trim(), _donorSource.Text.Trim() }
             .Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var hasCompatibleWinPe = await Task.Run(() =>
             ImageServicingEngine.HasCompatibleWinPePackages(_iso.Text.Trim(), extraWinPeRoots, Log));
@@ -436,6 +505,7 @@ public sealed class MainForm : Form
             string.IsNullOrWhiteSpace(_packageSource.Text) ? null : Path.GetFullPath(_packageSource.Text.Trim()),
             string.IsNullOrWhiteSpace(_fodSource.Text) ? null : Path.GetFullPath(_fodSource.Text.Trim()),
             string.IsNullOrWhiteSpace(_setupSource.Text) ? null : Path.GetFullPath(_setupSource.Text.Trim()),
+            string.IsNullOrWhiteSpace(_donorSource.Text) ? null : Path.GetFullPath(_donorSource.Text.Trim()),
             cabFiles,
             Path.GetFullPath(output),
             _allIndexes.Checked,
@@ -483,7 +553,7 @@ public sealed class MainForm : Form
     private void SetBusy(bool busy)
     {
         _busy = busy;
-        _inspect.Enabled = _autoDownload.Enabled = _browseCab.Enabled = _run.Enabled = !busy;
+        _inspect.Enabled = _inspectDonor.Enabled = _autoDownload.Enabled = _browseCab.Enabled = _run.Enabled = !busy;
         Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
     }
 
