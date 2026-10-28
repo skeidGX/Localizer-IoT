@@ -300,6 +300,7 @@ internal static class ImageServicingEngine
         var capabilities = new[]
         {
             "Language.Basic~~~ru-RU~0.0.1.0",
+            "Language.Fonts~~~und-Latn~0.0.1.0",
             "Language.OCR~~~ru-RU~0.0.1.0",
             "Language.TextToSpeech~~~ru-RU~0.0.1.0",
             "Language.Speech~~~ru-RU~0.0.1.0",
@@ -359,7 +360,7 @@ internal static class ImageServicingEngine
         TryIntl(dism, mountDir, "/Set-UILang:ru-RU", warnings);
         TryIntl(dism, mountDir, "/Set-SysLocale:ru-RU", warnings);
         TryIntl(dism, mountDir, "/Set-UserLocale:ru-RU", warnings);
-        TryIntl(dism, mountDir, "/Set-InputLocale:0419:00000419", warnings);
+        TryIntl(dism, mountDir, "/Set-InputLocale:0419:00000419;0409:00000409", warnings);
         TryIntl(dism, mountDir, "/Set-TimeZone:Russian Standard Time", warnings);
     }
 
@@ -537,17 +538,17 @@ internal static class ImageServicingEngine
   <settings pass=""windowsPE"">
     <component name=""Microsoft-Windows-International-Core-WinPE"" processorArchitecture=""{arch}"" publicKeyToken=""31bf3856ad364e35"" language=""neutral"" versionScope=""nonSxS"">
       <SetupUILanguage><UILanguage>ru-RU</UILanguage></SetupUILanguage>
-      <InputLocale>ru-RU</InputLocale><SystemLocale>ru-RU</SystemLocale><UILanguage>ru-RU</UILanguage><UserLocale>ru-RU</UserLocale>
+      <InputLocale>ru-RU;en-US</InputLocale><SystemLocale>ru-RU</SystemLocale><UILanguage>ru-RU</UILanguage><UserLocale>ru-RU</UserLocale>
     </component>
   </settings>
   <settings pass=""specialize"">
     <component name=""Microsoft-Windows-International-Core"" processorArchitecture=""{arch}"" publicKeyToken=""31bf3856ad364e35"" language=""neutral"" versionScope=""nonSxS"">
-      <InputLocale>ru-RU</InputLocale><SystemLocale>ru-RU</SystemLocale><UILanguage>ru-RU</UILanguage><UserLocale>ru-RU</UserLocale>
+      <InputLocale>ru-RU;en-US</InputLocale><SystemLocale>ru-RU</SystemLocale><UILanguage>ru-RU</UILanguage><UserLocale>ru-RU</UserLocale>
     </component>
   </settings>
   <settings pass=""oobeSystem"">
     <component name=""Microsoft-Windows-International-Core"" processorArchitecture=""{arch}"" publicKeyToken=""31bf3856ad364e35"" language=""neutral"" versionScope=""nonSxS"">
-      <InputLocale>ru-RU</InputLocale><SystemLocale>ru-RU</SystemLocale><UILanguage>ru-RU</UILanguage><UserLocale>ru-RU</UserLocale>
+      <InputLocale>ru-RU;en-US</InputLocale><SystemLocale>ru-RU</SystemLocale><UILanguage>ru-RU</UILanguage><UserLocale>ru-RU</UserLocale>
     </component>
   </settings>
 </unattend>";
