@@ -356,10 +356,11 @@ internal static class ImageServicingEngine
         var packageVersionMatch = Regex.Match(identity, @"~(?<version>\d+\.\d+\.\d+(?:\.\d+)?)\s*$");
         if (targetBuild is not null && packageVersionMatch.Success)
         {
-            var packageBuild = GetBuildVersion(packageVersionMatch.Groups["version"].Value);
-            if (packageBuild is not null && !packageBuild.Equals(targetBuild, StringComparison.OrdinalIgnoreCase))
+            var packageVersion = packageVersionMatch.Groups["version"].Value;
+            var packageBuild = GetBuildVersion(packageVersion);
+            if (packageBuild is not null && !AreCompatibleLanguagePackageBuilds(packageBuild, targetBuild))
                 throw new InvalidOperationException(
-                    $"CAB {Path.GetFileName(package)} имеет версию {packageVersionMatch.Groups["version"].Value}, а выбранный образ — {targetVersion}. Сборки не совпадают; пакет не устанавливается.");
+                    $"CAB {Path.GetFileName(package)} имеет базовую версию {packageVersion}, а выбранный образ — {targetVersion}. Это не известная совместимая пара выпусков; пакет не устанавливается.");
         }
 
         var archMatch = Regex.Match(identity, @"~(?<arch>amd64|x86|arm64)~", RegexOptions.IgnoreCase);
@@ -376,6 +377,29 @@ internal static class ImageServicingEngine
     {
         var match = Regex.Match(version ?? "", @"(?<build>\d+\.\d+\.\d+)(?:\.\d+)?");
         return match.Success ? match.Groups["build"].Value : null;
+    }
+
+    private static bool AreCompatibleLanguagePackageBuilds(string packageBuild, string targetBuild)
+    {
+        if (packageBuild.Equals(targetBuild, StringComparison.OrdinalIgnoreCase)) return true;
+
+        // Windows 10 2004 through 22H2 share the 19041 servicing baseline.
+        // Official language/FOD media for this family is commonly versioned 19041.1,
+        // while LTSC 2021 / 21H2 images may report build 19044.
+        var packageParts = packageBuild.Split('.');
+        var targetParts = targetBuild.Split('.');
+        if (packageParts.Length != 3 || targetParts.Length != 3) return false;
+        if (!packageParts[0].Equals(targetParts[0], StringComparison.Ordinal) ||
+            !packageParts[1].Equals(targetParts[1], StringComparison.Ordinal)) return false;
+
+        if (int.TryParse(packageParts[2], out var packageMajorBuild) &&
+            int.TryParse(targetParts[2], out var targetMajorBuild))
+        {
+            if (packageMajorBuild == 19041 && targetMajorBuild is >= 19041 and <= 19045) return true;
+            // Windows 11 23H2 is an enablement release based on the 22621 servicing baseline.
+            if (packageMajorBuild == 22621 && targetMajorBuild is 22621 or 22631) return true;
+        }
+        return false;
     }
 
     private static ImageIndexInfo ReadImageInfo(string dism, string imageFile, int index)
