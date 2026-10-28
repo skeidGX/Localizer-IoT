@@ -172,7 +172,7 @@ internal static class UupLanguagePackDownloader
 
                 progress?.Invoke(65);
                 log($"Русский Language Pack готов. CAB в кеше: {Directory.EnumerateFiles(cacheRoot, "*.cab").Count()}; Language Features CAB: {allFeatureCabs}.");
-                if (!cacheOk)
+                if (cacheOk == 0)
                     log("Некоторые дополнительные пакеты не скачаны. Основной Language Pack имеется, но результат не будет гарантированно полным.");
 
                 return new AutoLanguagePackageSource(cacheRoot, targetBuild, baseBuild, arch,
