@@ -125,175 +125,487 @@ public sealed class MainForm : Form
 
     private void BuildLayout()
     {
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 10 };
+        var root = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(16),
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = BackColor
+        };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 18));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 82));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         Controls.Add(root);
 
-        root.Controls.Add(new Label
+        var header = new Panel
         {
-            Text = "Русский язык для Windows IoT Enterprise LTSC\nВыбери ISO, укажи источник Language Pack / Features on Demand и запусти обработку. Исходный ISO не изменяется.",
+            Dock = DockStyle.Fill,
+            Height = 86,
+            MinimumSize = new Size(0, 86),
+            BackColor = Color.FromArgb(25, 43, 67),
+            Padding = new Padding(18, 12, 18, 12),
+            Margin = new Padding(0, 0, 0, 12)
+        };
+        var headerGrid = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 1,
+            BackColor = header.BackColor
+        };
+        headerGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 54));
+        headerGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        headerGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var mark = new Label
+        {
+            Text = "LI",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = new Font("Segoe UI", 15, FontStyle.Bold),
+            ForeColor = Color.White,
+            BackColor = Color.FromArgb(35, 125, 155),
+            Margin = new Padding(0, 0, 14, 0)
+        };
+        var titleStack = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = header.BackColor,
+            Margin = new Padding(0)
+        };
+        titleStack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        titleStack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        titleStack.Controls.Add(new Label
+        {
+            Text = "Localizer-IoT",
             AutoSize = true,
-            Font = new Font(Font, FontStyle.Bold),
-            Padding = new Padding(0, 0, 0, 8)
-        });
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 18, FontStyle.Bold),
+            Margin = new Padding(0, 0, 0, 1)
+        }, 0, 0);
+        titleStack.Controls.Add(new Label
+        {
+            Text = "Русификация установочного образа Windows IoT Enterprise LTSC",
+            AutoSize = true,
+            ForeColor = Color.FromArgb(205, 218, 232),
+            Font = new Font("Segoe UI", 9.5f),
+            Margin = new Padding(1, 0, 0, 0)
+        }, 0, 1);
+        var versionBadge = new Label
+        {
+            Text = "ALPHA 0.9.0.1",
+            AutoSize = true,
+            Anchor = AnchorStyles.Right,
+            TextAlign = ContentAlignment.MiddleCenter,
+            ForeColor = Color.FromArgb(220, 241, 247),
+            BackColor = Color.FromArgb(45, 70, 98),
+            Padding = new Padding(10, 7, 10, 7),
+            Margin = new Padding(8, 0, 0, 0),
+            Font = new Font("Segoe UI", 8.5f, FontStyle.Bold)
+        };
+        headerGrid.Controls.Add(mark, 0, 0);
+        headerGrid.Controls.Add(titleStack, 1, 0);
+        headerGrid.Controls.Add(versionBadge, 2, 0);
+        header.Controls.Add(headerGrid);
+        root.Controls.Add(header, 0, 0);
 
-        var isoPanel = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 3, AutoSize = true };
-        isoPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        isoPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        isoPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        isoPanel.Controls.Add(new Label { Text = "Исходный ISO:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
-        isoPanel.Controls.Add(_iso, 1, 0);
-        var pickIso = new Button { Text = "Обзор…", AutoSize = true };
+        _workspaceTabs = new TabControl
+        {
+            Dock = DockStyle.Fill,
+            Font = new Font("Segoe UI", 9.5f),
+            Padding = new Point(16, 8),
+            Margin = new Padding(0, 0, 0, 12),
+            HotTrack = true
+        };
+        var imageTab = new TabPage("1. Исходный образ") { BackColor = Color.White, UseVisualStyleBackColor = false, AutoScroll = true };
+        var sourcesTab = new TabPage("2. Языковые источники") { BackColor = Color.White, UseVisualStyleBackColor = false, AutoScroll = true };
+        var settingsTab = new TabPage("3. Параметры") { BackColor = Color.White, UseVisualStyleBackColor = false, AutoScroll = true };
+        var logTab = new TabPage("Журнал и диагностика") { BackColor = Color.White, UseVisualStyleBackColor = false };
+        _workspaceTabs.TabPages.AddRange(new[] { imageTab, sourcesTab, settingsTab, logTab });
+        root.Controls.Add(_workspaceTabs, 0, 1);
+
+        TableLayoutPanel CreateStack(TabPage page)
+        {
+            var stack = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                ColumnCount = 1,
+                RowCount = 0,
+                Padding = new Padding(12),
+                BackColor = Color.White,
+                GrowStyle = TableLayoutPanelGrowStyle.AddRows
+            };
+            stack.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            page.Controls.Add(stack);
+            return stack;
+        }
+
+        GroupBox Section(string title, Control content)
+        {
+            var group = new GroupBox
+            {
+                Text = title,
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(12, 10, 12, 12),
+                Margin = new Padding(0, 0, 0, 12),
+                ForeColor = Color.FromArgb(38, 58, 82),
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
+            };
+            content.Dock = DockStyle.Top;
+            content.Margin = new Padding(0);
+            content.Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
+            group.Controls.Add(content);
+            return group;
+        }
+
+        Button StyleButton(Button button, bool primary = false, bool accent = false)
+        {
+            button.FlatStyle = FlatStyle.Flat;
+            button.FlatAppearance.BorderSize = primary ? 0 : 1;
+            button.FlatAppearance.BorderColor = Color.FromArgb(207, 216, 226);
+            button.BackColor = primary ? Color.FromArgb(29, 91, 160) :
+                accent ? Color.FromArgb(222, 241, 244) : Color.FromArgb(249, 250, 252);
+            button.ForeColor = primary ? Color.White :
+                accent ? Color.FromArgb(26, 94, 112) : Color.FromArgb(42, 58, 78);
+            button.Padding = primary ? new Padding(15, 7, 15, 7) : new Padding(8, 4, 8, 4);
+            button.Margin = new Padding(4);
+            button.Cursor = Cursors.Hand;
+            if (primary) button.Font = new Font("Segoe UI", 10, FontStyle.Bold);
+            return button;
+        }
+
+        void AddSection(TableLayoutPanel stack, string title, Control content)
+        {
+            var row = stack.RowCount++;
+            stack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            stack.Controls.Add(Section(title, content), 0, row);
+        }
+
+        // Tab 1 — select source image, editions and output.
+        var imageStack = CreateStack(imageTab);
+        var sourceImageGrid = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            ColumnCount = 3,
+            RowCount = 3,
+            Padding = new Padding(0, 2, 0, 2)
+        };
+        sourceImageGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 142));
+        sourceImageGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        sourceImageGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        sourceImageGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        sourceImageGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        sourceImageGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        sourceImageGrid.Controls.Add(new Label
+        {
+            Text = "Установочный ISO",
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+            Margin = new Padding(3, 8, 8, 4)
+        }, 0, 0);
+        sourceImageGrid.Controls.Add(_iso, 1, 0);
+        var pickIso = StyleButton(new Button { Text = "Обзор…", AutoSize = true });
         pickIso.Click += (_, _) =>
         {
-            using var d = new OpenFileDialog { Filter = "ISO-образы (*.iso)|*.iso", Title = "Выберите исходный ISO Windows" };
+            using var d = new OpenFileDialog { Filter = "ISO-образы Windows (*.iso)|*.iso", Title = "Выберите исходный ISO Windows" };
             if (d.ShowDialog(this) == DialogResult.OK) _iso.Text = d.FileName;
         };
-        isoPanel.Controls.Add(pickIso, 2, 0);
-        root.Controls.Add(isoPanel);
+        sourceImageGrid.Controls.Add(pickIso, 2, 0);
+        sourceImageGrid.Controls.Add(_isoSummary, 1, 1);
+        sourceImageGrid.SetColumnSpan(_isoSummary, 2);
+        _isoSummary.ForeColor = Color.FromArgb(83, 101, 122);
+        _isoSummary.Margin = new Padding(3, 6, 3, 10);
+        sourceImageGrid.Controls.Add(StyleButton(_inspect, accent: true), 1, 2);
+        sourceImageGrid.Controls.Add(new Label
+        {
+            Text = "Проверит редакции, сборку и архитектуру. Исходный ISO не изменяется.",
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            ForeColor = Color.FromArgb(91, 107, 126),
+            Margin = new Padding(10, 8, 3, 4)
+        }, 2, 2);
+        AddSection(imageStack, "Исходный образ Windows", sourceImageGrid);
 
-        var mediaPanel = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 4, RowCount = 2, AutoSize = true };
-        mediaPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        mediaPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        mediaPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        mediaPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        mediaPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        mediaPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        mediaPanel.Controls.Add(new Label { Text = "Language Pack ISO:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
-        mediaPanel.Controls.Add(_packageSource, 1, 0);
-        var pickMediaIso = new Button { Text = "ISO…", AutoSize = true };
-        pickMediaIso.Click += (_, _) =>
+        var resultGrid = new TableLayoutPanel
         {
-            using var d = new OpenFileDialog { Filter = "ISO-образы (*.iso)|*.iso", Title = "Выберите ISO языковых пакетов Windows" };
-            if (d.ShowDialog(this) == DialogResult.OK) _packageSource.Text = d.FileName;
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            ColumnCount = 3,
+            RowCount = 4,
+            Padding = new Padding(0, 2, 0, 2)
         };
-        var pickMediaFolder = new Button { Text = "Папка…", AutoSize = true };
-        pickMediaFolder.Click += (_, _) =>
-        {
-            using var d = new FolderBrowserDialog { Description = "Выберите папку с CAB языковых пакетов ru-RU" };
-            if (d.ShowDialog(this) == DialogResult.OK) _packageSource.Text = d.SelectedPath;
-        };
-        mediaPanel.Controls.Add(pickMediaIso, 2, 0);
-        mediaPanel.Controls.Add(pickMediaFolder, 3, 0);
-
-        mediaPanel.Controls.Add(new Label { Text = "Features on Demand ISO:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 1);
-        mediaPanel.Controls.Add(_fodSource, 1, 1);
-        var pickFodIso = new Button { Text = "ISO…", AutoSize = true };
-        pickFodIso.Click += (_, _) =>
-        {
-            using var d = new OpenFileDialog { Filter = "ISO-образы (*.iso)|*.iso", Title = "Выберите Languages and Optional Features / Features on Demand ISO" };
-            if (d.ShowDialog(this) == DialogResult.OK) _fodSource.Text = d.FileName;
-        };
-        var pickFodFolder = new Button { Text = "Папка…", AutoSize = true };
-        pickFodFolder.Click += (_, _) =>
-        {
-            using var d = new FolderBrowserDialog { Description = "Выберите папку LanguagesAndOptionalFeatures с FOD-файлами" };
-            if (d.ShowDialog(this) == DialogResult.OK) _fodSource.Text = d.SelectedPath;
-        };
-        mediaPanel.Controls.Add(pickFodIso, 2, 1);
-        mediaPanel.Controls.Add(pickFodFolder, 3, 1);
-        root.Controls.Add(mediaPanel);
-
-        var setupPanel = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 4, AutoSize = true };
-        setupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        setupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        setupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        setupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        setupPanel.Controls.Add(new Label { Text = "Русские ресурсы Setup (опционально):", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
-        setupPanel.Controls.Add(_setupSource, 1, 0);
-        var pickSetupIso = new Button { Text = "ISO…", AutoSize = true };
-        pickSetupIso.Click += (_, _) =>
-        {
-            using var d = new OpenFileDialog { Filter = "ISO-образы (*.iso)|*.iso", Title = "Выберите соответствующий Russian Windows ISO с sources\\ru-ru" };
-            if (d.ShowDialog(this) == DialogResult.OK) _setupSource.Text = d.FileName;
-        };
-        var pickSetupFolder = new Button { Text = "Папка…", AutoSize = true };
-        pickSetupFolder.Click += (_, _) =>
-        {
-            using var d = new FolderBrowserDialog { Description = "Выберите распакованный Russian Windows media, содержащий sources\\ru-ru" };
-            if (d.ShowDialog(this) == DialogResult.OK) _setupSource.Text = d.SelectedPath;
-        };
-        setupPanel.Controls.Add(pickSetupIso, 2, 0);
-        setupPanel.Controls.Add(pickSetupFolder, 3, 0);
-        root.Controls.Add(setupPanel);
-
-        var donorPanel = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 5, AutoSize = true };
-        donorPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        donorPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        donorPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        donorPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        donorPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        donorPanel.Controls.Add(new Label { Text = "Русский ISO-донор (опционально):", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
-        donorPanel.Controls.Add(_donorSource, 1, 0);
-        var pickDonorIso = new Button { Text = "ISO…", AutoSize = true };
-        pickDonorIso.Click += (_, _) =>
-        {
-            using var d = new OpenFileDialog { Filter = "ISO-образы (*.iso)|*.iso", Title = "Выберите русский ISO-донор Windows 11 Enterprise LTSC 2024 или совместимого выпуска" };
-            if (d.ShowDialog(this) == DialogResult.OK) _donorSource.Text = d.FileName;
-        };
-        var pickDonorFolder = new Button { Text = "Папка…", AutoSize = true };
-        pickDonorFolder.Click += (_, _) =>
-        {
-            using var d = new FolderBrowserDialog { Description = "Выберите распакованный русский Windows media с sources\\install.wim/esd, sources\\ru-ru и языковыми CAB, если они присутствуют" };
-            if (d.ShowDialog(this) == DialogResult.OK) _donorSource.Text = d.SelectedPath;
-        };
-        donorPanel.Controls.Add(pickDonorIso, 2, 0);
-        donorPanel.Controls.Add(pickDonorFolder, 3, 0);
-        donorPanel.Controls.Add(_inspectDonor, 4, 0);
-        root.Controls.Add(donorPanel);
-
-        var packagePanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2 };
-        packagePanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        packagePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        packagePanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        packagePanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        packagePanel.Controls.Add(new Label { Text = "Дополнительные CAB (необязательно):", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
-        packagePanel.Controls.Add(_browseCab, 1, 0);
-        packagePanel.Controls.Add(_packages, 0, 1);
-        packagePanel.SetColumnSpan(_packages, 2);
-        _packages.Height = 70;
-        root.Controls.Add(packagePanel);
-
-        var options = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true };
-        options.Controls.Add(_allIndexes);
-        options.Controls.Add(new Label { Text = "Индекс (если отключены все редакции):", AutoSize = true, Padding = new Padding(8, 5, 0, 0) });
-        options.Controls.Add(_index);
-        options.Controls.Add(_inspect);
-        options.Controls.Add(_autoDownload);
-        options.Controls.Add(_cancelDownload);
-        options.Controls.Add(_useWindowsUpdateForCapabilities);
-        options.Controls.Add(_saveProfile);
-        options.Controls.Add(_loadProfile);
-        options.Controls.Add(_exportBundle);
-        options.Controls.Add(new Label { Text = "Выходной ISO:", AutoSize = true, Padding = new Padding(8, 5, 0, 0) });
-        _output.Width = 250;
-        _output.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Windows-IoT-LTSC-ru.iso");
-        options.Controls.Add(_output);
-        var chooseOutput = new Button { Text = "Сохранить как…", AutoSize = true };
+        resultGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 142));
+        resultGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        resultGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        for (var row = 0; row < 4; row++) resultGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        resultGrid.Controls.Add(new Label { Text = "Редакции", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 8, 8, 4), Font = new Font("Segoe UI", 9.5f, FontStyle.Bold) }, 0, 0);
+        var indexOptions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Dock = DockStyle.Fill, Margin = new Padding(0) };
+        indexOptions.Controls.Add(_allIndexes);
+        indexOptions.Controls.Add(new Label { Text = "Индекс:", AutoSize = true, Padding = new Padding(10, 4, 2, 0) });
+        indexOptions.Controls.Add(_index);
+        resultGrid.Controls.Add(indexOptions, 1, 0);
+        resultGrid.Controls.Add(new Label { Text = "Обычно оставляйте все редакции.", AutoSize = true, ForeColor = Color.FromArgb(91, 107, 126), Margin = new Padding(10, 5, 3, 3) }, 2, 0);
+        resultGrid.Controls.Add(new Label { Text = "Выходной ISO", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 8, 8, 4), Font = new Font("Segoe UI", 9.5f, FontStyle.Bold) }, 0, 1);
+        resultGrid.Controls.Add(_output, 1, 1);
+        var chooseOutput = StyleButton(new Button { Text = "Сохранить как…", AutoSize = true });
         chooseOutput.Click += (_, _) =>
         {
-            using var d = new SaveFileDialog { Filter = "ISO-образ (*.iso)|*.iso", FileName = "Windows-IoT-LTSC-ru.iso", DefaultExt = "iso", AddExtension = true };
+            using var d = new SaveFileDialog
+            {
+                Filter = "ISO-образ (*.iso)|*.iso",
+                FileName = Path.GetFileName(_output.Text),
+                DefaultExt = "iso",
+                AddExtension = true,
+                Title = "Куда сохранить новый ISO"
+            };
             if (d.ShowDialog(this) == DialogResult.OK) _output.Text = d.FileName;
         };
-        options.Controls.Add(chooseOutput);
-        root.Controls.Add(options);
+        resultGrid.Controls.Add(chooseOutput, 2, 1);
+        var resultNote = new Label
+        {
+            Text = "Английский останется языком отката (UILanguageFallback=en-US). Выберите отдельный путь — источник не перезаписывается.",
+            AutoSize = true,
+            ForeColor = Color.FromArgb(73, 100, 119),
+            Padding = new Padding(0, 4, 0, 4),
+            Margin = new Padding(3, 6, 3, 3)
+        };
+        resultGrid.Controls.Add(resultNote, 1, 2);
+        resultGrid.SetColumnSpan(resultNote, 2);
+        resultGrid.Controls.Add(new Label { Text = "Быстрый старт", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 8, 8, 4), Font = new Font("Segoe UI", 9.5f, FontStyle.Bold) }, 0, 3);
+        var hintPanel = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Dock = DockStyle.Fill, Margin = new Padding(0) };
+        hintPanel.Controls.Add(new Label { Text = "1  Выберите ISO", AutoSize = true, Padding = new Padding(0, 4, 14, 2) });
+        hintPanel.Controls.Add(new Label { Text = "2  Найдите ru-RU", AutoSize = true, Padding = new Padding(0, 4, 14, 2) });
+        hintPanel.Controls.Add(new Label { Text = "3  Создайте новый ISO", AutoSize = true, Padding = new Padding(0, 4, 0, 2) });
+        resultGrid.Controls.Add(hintPanel, 1, 3);
+        resultGrid.SetColumnSpan(hintPanel, 2);
+        AddSection(imageStack, "Редакции и результат", resultGrid);
 
-        var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true };
-        actions.Controls.Add(_run);
-        actions.Controls.Add(_progress);
-        root.Controls.Add(actions);
+        // Tab 2 — package acquisition and optional resource sources.
+        var sourceStack = CreateStack(sourcesTab);
+        var autoGrid = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 2, Padding = new Padding(0, 2, 0, 2) };
+        autoGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        autoGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        autoGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        autoGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        autoGrid.Controls.Add(StyleButton(_autoDownload, accent: true), 0, 0);
+        autoGrid.Controls.Add(new Label
+        {
+            Text = "Найти совместимый ru-RU в UUP Dump. Файлы проверяются; LCU/SSU/KB/MSU не добавляются.",
+            AutoSize = true,
+            ForeColor = Color.FromArgb(83, 101, 122),
+            Anchor = AnchorStyles.Left,
+            Margin = new Padding(8, 7, 2, 5)
+        }, 1, 0);
+        autoGrid.Controls.Add(_sourceSummary, 1, 1);
+        _sourceSummary.Margin = new Padding(8, 5, 2, 6);
+        _sourceSummary.ForeColor = Color.FromArgb(83, 101, 122);
+        AddSection(sourceStack, "Автоматический подбор языка", autoGrid);
 
-        root.Controls.Add(_log);
-        root.Controls.Add(_status);
+        var mediaGrid = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            ColumnCount = 1,
+            RowCount = 5,
+            Padding = new Padding(0, 2, 0, 2),
+            GrowStyle = TableLayoutPanelGrowStyle.AddRows
+        };
+        mediaGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        AddMediaSourceRow(mediaGrid, 0, "Language Pack", _packageSource,
+            "Выберите Language Pack ISO", "Выберите папку с CAB языковых пакетов ru-RU");
+        AddMediaSourceRow(mediaGrid, 1, "Features on Demand", _fodSource,
+            "Выберите Languages and Optional Features / FoD ISO", "Выберите папку LanguagesAndOptionalFeatures / FoD");
+        AddMediaSourceRow(mediaGrid, 2, "Ресурсы Windows Setup", _setupSource,
+            "Выберите Russian Windows ISO с sources\\ru-ru", "Выберите распакованный media с sources\\ru-ru");
+        AddMediaSourceRow(mediaGrid, 3, "Русский ISO-донор", _donorSource,
+            "Выберите русский ISO-донор", "Выберите распакованный русский Windows media", _inspectDonor);
+        AddSection(sourceStack, "Источники (ISO или распакованная папка)", mediaGrid);
+
+        var cabGrid = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 2, Padding = new Padding(0, 2, 0, 2) };
+        cabGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        cabGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        cabGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        cabGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        cabGrid.Controls.Add(new Label
+        {
+            Text = "Укажите отдельные CAB только при необходимости. Программа проверит архитектуру и совместимость.",
+            AutoSize = true,
+            ForeColor = Color.FromArgb(83, 101, 122),
+            Margin = new Padding(3, 6, 3, 6)
+        }, 0, 0);
+        cabGrid.Controls.Add(StyleButton(_browseCab), 1, 0);
+        _packages.Dock = DockStyle.Fill;
+        _packages.MinimumSize = new Size(0, 72);
+        _packages.Height = 76;
+        _packages.Font = new Font("Consolas", 9);
+        cabGrid.Controls.Add(_packages, 0, 1);
+        cabGrid.SetColumnSpan(_packages, 2);
+        AddSection(sourceStack, "Дополнительные CAB (необязательно)", cabGrid);
+
+        // Tab 3 — policy, saved profiles and offline package.
+        var settingsStack = CreateStack(settingsTab);
+        var safetyGrid = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 3, Padding = new Padding(0, 2, 0, 2) };
+        safetyGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        for (var row = 0; row < 3; row++) safetyGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        safetyGrid.Controls.Add(_useWindowsUpdateForCapabilities, 0, 0);
+        safetyGrid.Controls.Add(new Label
+        {
+            Text = "По умолчанию всё обслуживается офлайн. Эта опция касается только языковых FOD установленной Windows и не включает LCU/SSU/KB/MSU, обновление версии ОС или получение FOD для WinRE.",
+            AutoSize = true,
+            MaximumSize = new Size(980, 0),
+            ForeColor = Color.FromArgb(83, 101, 122),
+            Margin = new Padding(3, 7, 3, 7)
+        }, 0, 1);
+        safetyGrid.Controls.Add(new Label
+        {
+            Text = "Внимание: если флажок включён, DISM может обращаться к источнику Windows Update/WSUS, настроенному на этом компьютере.",
+            AutoSize = true,
+            MaximumSize = new Size(980, 0),
+            ForeColor = Color.FromArgb(151, 94, 28),
+            Margin = new Padding(3, 3, 3, 8)
+        }, 0, 2);
+        AddSection(settingsStack, "Политика обновлений и источников", safetyGrid);
+
+        var profileGrid = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Padding = new Padding(0, 2, 0, 2) };
+        profileGrid.Controls.Add(StyleButton(_saveProfile));
+        profileGrid.Controls.Add(StyleButton(_loadProfile));
+        profileGrid.Controls.Add(new Label
+        {
+            Text = "Профиль хранит пути и настройки, но не копирует ISO или пакеты.",
+            AutoSize = true,
+            MaximumSize = new Size(850, 0),
+            ForeColor = Color.FromArgb(83, 101, 122),
+            Margin = new Padding(10, 10, 3, 3)
+        });
+        AddSection(settingsStack, "Профили проекта", profileGrid);
+
+        var bundleGrid = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 2, Padding = new Padding(0, 2, 0, 2) };
+        bundleGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        bundleGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        bundleGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        bundleGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        bundleGrid.Controls.Add(StyleButton(_exportBundle, accent: true), 0, 0);
+        bundleGrid.Controls.Add(new Label
+        {
+            Text = "Собирает найденные русские CAB и Setup resources из распакованных папок в ZIP с SHA-256 манифестом; обновления Windows исключаются.",
+            AutoSize = true,
+            MaximumSize = new Size(900, 0),
+            ForeColor = Color.FromArgb(83, 101, 122),
+            Anchor = AnchorStyles.Left,
+            Margin = new Padding(10, 7, 3, 5)
+        }, 1, 0);
+        bundleGrid.Controls.Add(new Label
+        {
+            Text = "ISO-файлы автоматически не распаковываются: сначала укажите папку или локальный кеш.",
+            AutoSize = true,
+            ForeColor = Color.FromArgb(83, 101, 122),
+            Margin = new Padding(3, 8, 3, 3)
+        }, 0, 1);
+        bundleGrid.SetColumnSpan(bundleGrid.GetControlFromPosition(0, 1)!, 2);
+        AddSection(settingsStack, "Офлайн-пакет компонентов", bundleGrid);
+
+        AddSection(settingsStack, "Перед развёртыванием", new Label
+        {
+            Text = "Если совместимых WinPE/WinRE ресурсов нет, программа должна вывести предупреждение, а не внедрять пакеты другой архитектуры или базовой сборки. Перед реальной установкой протестируйте ISO в виртуальной машине.",
+            AutoSize = true,
+            MaximumSize = new Size(1020, 0),
+            ForeColor = Color.FromArgb(83, 101, 122),
+            Padding = new Padding(3, 4, 3, 8)
+        });
+
+        // Tab 4 — searchable/copyable operations log.
+        var logLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Padding = new Padding(12),
+            BackColor = Color.White
+        };
+        logLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        logLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var logToolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true, Margin = new Padding(0, 0, 0, 8) };
+        logToolbar.Controls.Add(StyleButton(_copyLog));
+        logToolbar.Controls.Add(StyleButton(_saveLog));
+        logToolbar.Controls.Add(StyleButton(_clearLog));
+        logLayout.Controls.Add(logToolbar, 0, 0);
+        _log.Dock = DockStyle.Fill;
+        _log.Font = new Font("Consolas", 9);
+        _log.BackColor = Color.FromArgb(248, 250, 252);
+        _log.ForeColor = Color.FromArgb(35, 47, 62);
+        _log.BorderStyle = BorderStyle.FixedSingle;
+        logLayout.Controls.Add(_log, 0, 1);
+        logTab.Controls.Add(logLayout);
+
+        // Persistent footer keeps the current stage, progress and primary action visible.
+        var footer = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 4,
+            RowCount = 3,
+            BackColor = Color.White,
+            Padding = new Padding(12, 8, 12, 8),
+            Margin = new Padding(0),
+            CellBorderStyle = TableLayoutPanelCellBorderStyle.None
+        };
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 300));
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        for (var row = 0; row < 3; row++) footer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        _status.AutoSize = true;
+        _status.Font = new Font("Segoe UI", 9.25f, FontStyle.Bold);
+        _status.ForeColor = Color.FromArgb(47, 72, 95);
+        _status.BackColor = Color.FromArgb(231, 237, 244);
+        _status.Padding = new Padding(9, 5, 9, 5);
+        _status.Margin = new Padding(0, 0, 0, 4);
+        _progressDetail.Dock = DockStyle.Fill;
+        _progressDetail.ForeColor = Color.FromArgb(83, 101, 122);
+        _progressDetail.Margin = new Padding(0, 0, 6, 2);
+        _progress.Width = 300;
+        _progress.MinimumSize = new Size(220, 18);
+        _progress.Dock = DockStyle.Fill;
+        _progressPercent.Font = new Font("Segoe UI", 8.5f, FontStyle.Bold);
+        _progressPercent.ForeColor = Color.FromArgb(83, 101, 122);
+        _progressPercent.Margin = new Padding(8, 2, 8, 2);
+        StyleButton(_run, primary: true);
+        _run.Text = "Создать русифицированный ISO";
+        _run.MinimumSize = new Size(248, 42);
+        StyleButton(_cancelDownload);
+        _cancelDownload.MinimumSize = new Size(150, 40);
+        footer.Controls.Add(_status, 0, 0);
+        footer.SetColumnSpan(_status, 4);
+        footer.Controls.Add(_progressDetail, 0, 1);
+        footer.Controls.Add(_progress, 1, 1);
+        footer.Controls.Add(_progressPercent, 2, 1);
+        footer.Controls.Add(_run, 0, 2);
+        footer.Controls.Add(_cancelDownload, 1, 2);
+        footer.SetColumnSpan(_cancelDownload, 3);
+        root.Controls.Add(footer, 0, 2);
+
+        foreach (var textBox in new[] { _iso, _packageSource, _fodSource, _setupSource, _donorSource, _output })
+        {
+            textBox.Dock = DockStyle.Fill;
+            textBox.Height = 28;
+            textBox.Margin = new Padding(3, 4, 3, 4);
+            textBox.BorderStyle = BorderStyle.FixedSingle;
+            textBox.BackColor = Color.White;
+            textBox.ForeColor = Color.FromArgb(35, 47, 62);
+            textBox.Font = new Font("Segoe UI", 9.5f);
+        }
+        _packages.BackColor = Color.White;
+        _packages.ForeColor = Color.FromArgb(35, 47, 62);
+        _allIndexes.Margin = new Padding(2, 5, 2, 3);
+        _index.Margin = new Padding(2, 3, 2, 3);
+        _output.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Windows-IoT-LTSC-ru.iso");
     }
 
     private void OnDragEnter(object? sender, DragEventArgs e)
