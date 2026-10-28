@@ -29,6 +29,9 @@ All notable changes to Localizer-IoT are documented here.
 - WinRE/Setup behavior can vary by image layout. Review the generated `.report.txt` and test the resulting ISO in a virtual machine before using it on a physical device.
 - The original English language is retained as fallback, but complete bilingual behavior has not been validated on every edition.
 
+### Distribution note
+- This alpha EXE is not Authenticode code-signed. Windows may display a SmartScreen or unknown-publisher warning.
+
 ### Requirements
 - Windows 10/11 x64 servicing workstation and administrator rights.
 - Internet access for language-package discovery and, if required, ADK/WinPE setup.
