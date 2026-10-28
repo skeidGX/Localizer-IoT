@@ -293,12 +293,13 @@ internal static class ImageServicingEngine
                     throw new InvalidOperationException("Русский ISO-донор должен быть существующей папкой или ISO-файлом.");
                 }
 
-                if (donorMediaRoot is not null) packageRoots.Add(donorMediaRoot);
+                var resolvedDonorRoot = donorMediaRoot ?? throw new InvalidOperationException("Не удалось определить корень русского ISO-донора.");
+                packageRoots.Add(resolvedDonorRoot);
                 report(6, "Добавлен русский ISO-донор: поиск Language Pack, FOD, WinPE и ресурсов sources\\ru-ru.");
                 var donorInstallImage = new[]
                 {
-                    Path.Combine(donorMediaRoot, "sources", "install.wim"),
-                    Path.Combine(donorMediaRoot, "sources", "install.esd")
+                    Path.Combine(resolvedDonorRoot, "sources", "install.wim"),
+                    Path.Combine(resolvedDonorRoot, "sources", "install.esd")
                 }.FirstOrDefault(File.Exists);
                 if (donorInstallImage is not null)
                 {
