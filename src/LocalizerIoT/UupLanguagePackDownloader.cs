@@ -66,15 +66,17 @@ internal static class UupLanguagePackDownloader
                 $"UUP Dump не вернул подходящий выпуск для базы {baseBuild} и архитектуры {arch}. " +
                 "Автоматический подбор недоступен для этой версии; укажите совместимый официальный Language Pack ISO или папку с CAB.");
 
-        var cacheRoot = Path.Combine(
+        var cacheBase = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Localizer-IoT", "Cache", "ru-RU", $"{baseBuild}-{arch}");
-        Directory.CreateDirectory(cacheRoot);
+        Directory.CreateDirectory(cacheBase);
 
         var errors = new List<string>();
         foreach (var build in builds)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var cacheRoot = Path.Combine(cacheBase, Regex.Replace(build.Id, @"[^A-Za-z0-9_-]", "_"));
+            Directory.CreateDirectory(cacheRoot);
             try
             {
                 log($"Проверяю источник: {build.Title} ({build.Build}, {build.Architecture}).");
