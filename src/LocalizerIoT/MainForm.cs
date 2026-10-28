@@ -381,6 +381,10 @@ public sealed class MainForm : Form
                 "Источники заполнены автоматически. Полная русификация экранов Setup/WinPE зависит от наличия соответствующих ресурсов; результат будет указан в отчёте.",
                 "Компоненты ru-RU подготовлены", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
+        catch (OperationCanceledException)
+        {
+            Log("Загрузка ru-RU отменена пользователем. Незавершённые части файлов сохранены для возможного продолжения.");
+        }
         catch (Exception ex)
         {
             Log("Автоматическая загрузка RU не завершена: " + ex.Message);
@@ -434,13 +438,18 @@ public sealed class MainForm : Form
             _progress.Value = 0;
             try
             {
-                Log("Не задан источник Language Pack или русский ISO-донор — запускаю автоматический поиск и скачивание ru-RU.");
+                Log("Не найден отдельный основной Language Pack CAB — запускаю автоматический поиск и скачивание ru-RU.");
                 var result = await DownloadRussianPackagesWithCancellationAsync();
                 _packageSource.Text = result.Directory;
                 if (string.IsNullOrWhiteSpace(_fodSource.Text)) _fodSource.Text = result.Directory;
                 cabFiles = _packages.Text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
                     .Select(s => s.Trim()).Where(File.Exists).ToArray();
                 Log($"Автоматически подготовлено CAB: {result.PackagesReady}; FOD CAB: {result.FeaturePackagesReady}.");
+            }
+            catch (OperationCanceledException)
+            {
+                Log("Автоматический поиск/загрузка ru-RU отменены. Частичные файлы сохранены для продолжения.");
+                return;
             }
             catch (Exception ex)
             {
