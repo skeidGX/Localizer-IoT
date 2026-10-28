@@ -14,10 +14,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 8.0.x
+      - name: Verify installed .NET SDK
+        shell: pwsh
+        run: |
+          dotnet --list-sdks
+          $sdks = dotnet --list-sdks
+          if (!($sdks | Select-String '^8\.')) { throw "A .NET 8 SDK is required on the runner." }
       - name: Build self-contained single-file EXE
         shell: pwsh
         run: dotnet publish src/LocalizerIoT/LocalizerIoT.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o artifacts/Localizer-IoT-win-x64
