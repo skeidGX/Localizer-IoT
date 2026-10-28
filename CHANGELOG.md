@@ -2,6 +2,23 @@
 
 All notable changes to Localizer-IoT are documented here.
 
+## [0.9.0.0] — 2026-10-29
+
+### Added
+- Added up to three parallel UUP payload transfers, retry/backoff for temporary network/API failures, HTTP Range continuation for partial payloads, and refreshed payload URLs after expiry/authorization errors.
+- Added a visible cancellation action for UUP discovery/download; verified cache entries are reused and incomplete `.partial` downloads are retained for possible resumption.
+- Added an explicit, disabled-by-default option to use the configured Windows Update/WSUS source only for missing language Features on Demand capabilities. This option does not add LCU, SSU, KB, MSU, or other OS update packages.
+- Expanded the output report to state whether Windows Update fallback for language capabilities was enabled and to confirm that OS update payloads were not integrated.
+
+### Fixed
+- Fixed the automatic Language Pack discovery condition: selecting a Russian donor ISO no longer suppresses UUP discovery when no standalone core Language Pack CAB is available. An extracted donor folder containing a standalone core language CAB can still satisfy the package source without an unnecessary automatic download.
+- Improved retry behavior for UUP Dump API queries and limited parallel download concurrency to reduce transient failures and excessive connection pressure.
+
+### Compatibility and safety
+- The default remains offline servicing: local package/FOD sources are tried first and Windows Update is not contacted unless the user explicitly enables the language-capability-only option.
+- The downloader continues to exclude likely Windows update payloads and validates downloaded files against UUP Dump's published size and SHA-1 metadata. SHA-1 here is an integrity check against the API metadata, not an independent publisher signature.
+- This release is still alpha. The exact user ISO, image servicing, setup boot, and WinRE have not been end-to-end tested in a VM in this environment; review the report and test the produced ISO before deployment.
+
 ## [0.1.0.1] — 2026-10-29
 
 ### Added
