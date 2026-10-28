@@ -579,9 +579,10 @@ internal static class ImageServicingEngine
         foreach (var file in explicitFiles)
         {
             if (!File.Exists(file)) continue;
-            if (Path.GetExtension(file).Equals(".msu", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("MSU-пакеты не применяются: ты просил не обновлять Windows. Выбирай CAB-пакеты языка/FOD.");
-            if (Path.GetExtension(file).Equals(".cab", StringComparison.OrdinalIgnoreCase)) found.Add(Path.GetFullPath(file));
+            if (Path.GetExtension(file).Equals(".msu", StringComparison.OrdinalIgnoreCase) || IsLikelyWindowsUpdatePackage(file))
+                throw new InvalidOperationException("Пакеты обновления не применяются: ты просил не обновлять Windows. Удали MSU/LCU/KB/SSU CAB и выбирай только CAB языкового пакета или FOD.");
+            if (Path.GetExtension(file).Equals(".cab", StringComparison.OrdinalIgnoreCase) && IsPotentialLanguageComponent(file))
+                found.Add(Path.GetFullPath(file));
         }
         foreach (var root in packageRoots)
         {
@@ -589,7 +590,8 @@ internal static class ImageServicingEngine
             try
             {
                 foreach (var file in Directory.EnumerateFiles(root, "*.cab", SearchOption.AllDirectories))
-                    if (IsRussianPath(file)) found.Add(Path.GetFullPath(file));
+                    if (IsRussianPath(file) && !IsLikelyWindowsUpdatePackage(file) && IsPotentialLanguageComponent(file))
+                        found.Add(Path.GetFullPath(file));
             }
             catch { /* inaccessible folder is reported by the lack of packages below */ }
         }
@@ -669,6 +671,30 @@ internal static class ImageServicingEngine
         path.Contains("ru-ru", StringComparison.OrdinalIgnoreCase) ||
         path.Contains("ru_ru", StringComparison.OrdinalIgnoreCase) ||
         path.Contains("russian", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsLikelyWindowsUpdatePackage(string path)
+    {
+        var name = Path.GetFileName(path);
+        return Regex.IsMatch(name, @"KB\d{6,}", RegexOptions.IgnoreCase) ||
+               name.Contains("Package_for_RollupFix", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("ServicingStack", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("Cumulative", StringComparison.OrdinalIgnoreCase) ||
+               Regex.IsMatch(name, @"(^|[-_.])LCU([-_.]|$)", RegexOptions.IgnoreCase) ||
+               Regex.IsMatch(name, @"(^|[-_.])SSU([-_.]|$)", RegexOptions.IgnoreCase);
+    }
+
+    private static bool IsPotentialLanguageComponent(string path)
+    {
+        if (IsLikelyWindowsUpdatePackage(path)) return false;
+        if (IsCoreLanguagePack(path) || IsWinPePackage(path) || IsLanguageFeatureSatellite(path)) return true;
+        var name = Path.GetFileName(path);
+        return IsRussianPath(path) &&
+            (name.Contains("LanguagePack", StringComparison.OrdinalIgnoreCase) ||
+             name.Contains("Language-Pack", StringComparison.OrdinalIgnoreCase) ||
+             name.Contains("LanguageFeature", StringComparison.OrdinalIgnoreCase) ||
+             name.Contains("FoD", StringComparison.OrdinalIgnoreCase) ||
+             name.Contains("Features-On-Demand", StringComparison.OrdinalIgnoreCase));
+    }
 
     private static bool IsCoreLanguagePack(string path)
     {
