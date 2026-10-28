@@ -68,8 +68,24 @@ internal static class ImageServicingEngine
         if (PathComparer.Equals(sourceIso, outputIso))
             throw new InvalidOperationException("Выходной ISO не может совпадать с исходным файлом.");
         if (!IsAdministrator()) throw new InvalidOperationException("Для обслуживания образов запустите программу от имени администратора.");
-        Directory.CreateDirectory(Path.GetDirectoryName(outputIso)!);
-        if (File.Exists(outputIso)) File.Delete(outputIso);
+        var outputDirectory = Path.GetDirectoryName(outputIso)!;
+        Directory.CreateDirectory(outputDirectory);
+        var tempOutputIso = Path.Combine(outputDirectory,
+            Path.GetFileNameWithoutExtension(outputIso) + ".building-" + Guid.NewGuid().ToString("N") + ".iso");
+        var tempReport = tempOutputIso + ".report.txt";
+        var sourceSize = new FileInfo(sourceIso).Length;
+        var tempRoot = Path.GetPathRoot(Path.GetFullPath(Path.GetTempPath()))!;
+        var outputRoot = Path.GetPathRoot(outputDirectory)!;
+        var tempDrive = new DriveInfo(tempRoot);
+        var outputDrive = new DriveInfo(outputRoot);
+        var sameDrive = PathComparer.Equals(tempDrive.Name, outputDrive.Name);
+        var gib = 1024L * 1024 * 1024;
+        var requiredTemp = (long)(sourceSize * (sameDrive ? 3.0 : 2.2)) + 3 * gib;
+        var requiredOutput = sameDrive ? requiredTemp : sourceSize + gib;
+        if (tempDrive.AvailableFreeSpace < requiredTemp || outputDrive.AvailableFreeSpace < requiredOutput)
+        {
+            throw new IOException($"Недостаточно свободного места. Требуется ориентировочно {requiredTemp / gib} ГБ на диске временных файлов и {requiredOutput / gib} ГБ на диске результата; сейчас доступно {tempDrive.AvailableFreeSpace / gib} ГБ и {outputDrive.AvailableFreeSpace / gib} ГБ соответственно.");
+        }
 
         var work = Path.Combine(Path.GetTempPath(), "LocalizerIoT-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(work);
@@ -234,9 +250,11 @@ internal static class ImageServicingEngine
             var bootOrder = CreateBootOrderFile(stage, work);
             if (bootOrder is not null) bootArgs.Add("-yo" + bootOrder);
             bootArgs.Add(stage);
-            bootArgs.Add(outputIso);
+            bootArgs.Add(tempOutputIso);
             var isoBuild = Run(oscdimg, bootArgs.ToArray());
             if (isoBuild.ExitCode != 0) throw new InvalidOperationException("oscdimg не смог создать ISO:\r\n" + isoBuild.Output);
+            if (!File.Exists(tempOutputIso) || new FileInfo(tempOutputIso).Length < 1024 * 1024)
+                throw new InvalidOperationException("oscdimg сообщил об успехе, но выходной ISO отсутствует или выглядит повреждённым (меньше 1 МиБ).");
 
             var reportText = new StringBuilder();
             reportText.AppendLine("Localizer-IoT report");
@@ -249,7 +267,9 @@ internal static class ImageServicingEngine
             reportText.AppendLine("Warnings / incomplete localization:");
             foreach (var warning in warnings) reportText.AppendLine("  - " + warning);
             reportText.AppendLine("Important: boot/WinRE servicing may be partial depending on the availability and matching version of WinPE language optional components.");
-            File.WriteAllText(outputIso + ".report.txt", reportText.ToString(), new UTF8Encoding(false));
+            File.WriteAllText(tempReport, reportText.ToString(), new UTF8Encoding(false));
+            File.Move(tempOutputIso, outputIso, true);
+            File.Move(tempReport, outputIso + ".report.txt", true);
 
             report(100, warnings.Count == 0
                 ? "ISO создан. Итоговый отчёт сохранён рядом с ISO."
@@ -268,6 +288,8 @@ internal static class ImageServicingEngine
                 TryDismountIso(Path.GetFullPath(request.RussianSetupMedia));
             try { Run(dism, "/Cleanup-Wim"); } catch { }
             try { Directory.Delete(work, true); } catch { }
+            try { if (File.Exists(tempOutputIso)) File.Delete(tempOutputIso); } catch { }
+            try { if (File.Exists(tempReport)) File.Delete(tempReport); } catch { }
         }
     }
 
