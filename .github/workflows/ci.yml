@@ -1,0 +1,39 @@
+name: Build validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore src/LocalizerIoT/LocalizerIoT.csproj
+
+      - name: Build
+        run: dotnet build src/LocalizerIoT/LocalizerIoT.csproj -c Release --no-restore
+
+      - name: Publish self-contained Windows x64 EXE
+        shell: pwsh
+        run: dotnet publish src/LocalizerIoT/LocalizerIoT.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o artifacts/Localizer-IoT-win-x64
+
+      - name: Verify EXE
+        shell: pwsh
+        run: |
+          $exe = "artifacts/Localizer-IoT-win-x64/Localizer-IoT.exe"
+          if (!(Test-Path $exe)) { throw "Expected EXE not found: $exe" }
+          Get-FileHash $exe -Algorithm SHA256 | Format-List
+          Get-Item $exe | Format-List Name,Length
