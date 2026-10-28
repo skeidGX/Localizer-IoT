@@ -134,6 +134,9 @@ internal static class ImageServicingEngine
                 }
                 else throw new InvalidOperationException("Источник ресурсов Windows Setup должен быть существующей папкой или ISO-файлом.");
             }
+            if (setupMediaRoot is not null)
+                packageRoots.Add(setupMediaRoot);
+
             if (!string.IsNullOrWhiteSpace(request.FodSource))
             {
                 var fodSource = request.FodSource.Trim();
