@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Principal;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -311,7 +312,7 @@ internal static class ImageServicingEngine
             report(7, $"Целевая Windows: {targetImageInfo.Name}; версия {targetImageInfo.Version}; сборка {targetBuild}; архитектура {architecture}.");
 
             var discoveredPackages = DiscoverRussianPackages(packageRoots, request.ExplicitCabFiles);
-            var packages = FilterForArchitecture(discoveredPackages, architecture, report);
+            var packages = DeduplicateIdenticalPackageFiles(FilterForArchitecture(discoveredPackages, architecture, report), report);
             var capabilitySources = FindCapabilitySources(packageRoots);
             var windowsPackages = packages.Where(p => !IsWinPePackage(p) && !IsLanguageFeatureSatellite(p)).Distinct(PathComparer)
                 .OrderByDescending(IsCoreLanguagePack).ThenBy(p => p, PathComparer).ToArray();
@@ -957,6 +958,62 @@ internal static class ImageServicingEngine
             kept.Add(package);
         }
         return kept;
+    }
+
+    private static List<string> DeduplicateIdenticalPackageFiles(IEnumerable<string> packages, Action<int, string> report)
+    {
+        var kept = new List<string>();
+        var groups = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var shaCache = new Dictionary<string, string>(PathComparer);
+        var duplicates = 0;
+
+        foreach (var path in packages)
+        {
+            FileInfo info;
+            try { info = new FileInfo(path); }
+            catch { kept.Add(path); continue; }
+            var key = Path.GetFileName(path) + "|" + info.Length.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (!groups.TryGetValue(key, out var sameNameAndSize))
+            {
+                groups[key] = new List<string> { path };
+                kept.Add(path);
+                continue;
+            }
+
+            var hash = GetSha256(path, shaCache);
+            var duplicate = false;
+            foreach (var prior in sameNameAndSize)
+            {
+                if (GetSha256(prior, shaCache).Equals(hash, StringComparison.OrdinalIgnoreCase))
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate)
+            {
+                duplicates++;
+                report(8, $"Повтор CAB из нескольких источников пропущен: {Path.GetFileName(path)}");
+                continue;
+            }
+
+            sameNameAndSize.Add(path);
+            kept.Add(path);
+        }
+
+        if (duplicates > 0)
+            report(8, $"Удалено повторяющихся языковых CAB по SHA-256: {duplicates}. Отличающиеся пакеты с одинаковым именем/размером сохраняются.");
+        return kept;
+    }
+
+    private static string GetSha256(string path, Dictionary<string, string> cache)
+    {
+        if (cache.TryGetValue(path, out var hash)) return hash;
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            1024 * 256, FileOptions.SequentialScan);
+        hash = Convert.ToHexString(SHA256.HashData(stream));
+        cache[path] = hash;
+        return hash;
     }
 
     private static bool HasRequiredSetupLanguagePackages(string winpeRoot)
