@@ -181,7 +181,7 @@ internal static class UupLanguagePackDownloader
                     .Any(IsCoreLanguagePackFile);
                 if (!readyCore)
                 {
-                    cacheOk = false;
+                    cacheOk = 0;
                     errors.Add($"Для выпуска {build.Build} не удалось подготовить основной CAB-пакет ru-RU.");
                     continue;
                 }
