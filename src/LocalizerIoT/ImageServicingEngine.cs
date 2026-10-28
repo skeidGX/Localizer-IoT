@@ -378,6 +378,13 @@ internal static class ImageServicingEngine
         return match.Success ? match.Groups["build"].Value : null;
     }
 
+    private static ImageIndexInfo ReadImageInfo(string dism, string imageFile, int index)
+    {
+        var detailed = Run(dism, "/English", "/Get-WimInfo", "/WimFile:" + imageFile, "/Index:" + index);
+        EnsureSuccess(detailed, $"DISM не смог прочитать индекс {index} в образе {imageFile}.");
+        return ParseImageInfo(index, detailed.Output);
+    }
+
     private static void TryAddLanguageCapabilities(string dism, string mountDir, string[] packages, string[] capabilitySources, List<string> warnings,
         Action<int, string> report, int progress)
     {
@@ -486,8 +493,10 @@ internal static class ImageServicingEngine
             var mount = Run(dism, "/Mount-Image", "/ImageFile:" + winreCopy, "/Index:1", "/MountDir:" + winreMount, "/CheckIntegrity");
             if (mount.ExitCode != 0) throw new InvalidOperationException(ShortOutput(mount.Output));
             isMounted = true;
+            var winreInfo = ReadFirstImageInfo(dism, winreCopy);
             foreach (var cab in languagePacks)
             {
+                ValidatePackageCompatibility(dism, cab, winreInfo.Version, winreInfo.Architecture, warnings);
                 var add = Run(dism, "/Image:" + winreMount, "/Add-Package", "/PackagePath:" + cab);
                 if (add.ExitCode != 0)
                     throw new InvalidOperationException($"Не удалось добавить русский Language Pack в WinRE ({Path.GetFileName(cab)}): {ShortOutput(add.Output)}");
@@ -545,6 +554,29 @@ internal static class ImageServicingEngine
         if (info.ExitCode != 0) { AddWarning(warnings, "Не удалось прочитать boot.wim; Windows Setup останется без локализации."); return; }
         var indices = Regex.Matches(info.Output, @"(?m)^\s*Index\s*:\s*(\d+)", RegexOptions.IgnoreCase)
             .Select(m => int.Parse(m.Groups[1].Value)).Distinct().OrderBy(i => i).ToArray();
+        if (!indices.Contains(2))
+        {
+            AddWarning(warnings, "В boot.wim нет стандартного индекса 2 Windows Setup. Локализация boot.wim пропущена, чтобы не изменить неизвестный образ.");
+            return;
+        }
+        ImageIndexInfo bootSetupInfo;
+        try { bootSetupInfo = ReadImageInfo(dism, bootWim, 2); }
+        catch (Exception ex)
+        {
+            AddWarning(warnings, "Не удалось определить версию boot.wim index 2: " + ex.Message);
+            return;
+        }
+        try
+        {
+            ValidatePackageCompatibility(dism, lp, bootSetupInfo.Version, bootSetupInfo.Architecture, warnings);
+            ValidatePackageCompatibility(dism, setup, bootSetupInfo.Version, bootSetupInfo.Architecture, warnings);
+            ValidatePackageCompatibility(dism, setupClient, bootSetupInfo.Version, bootSetupInfo.Architecture, warnings);
+        }
+        catch (Exception ex)
+        {
+            AddWarning(warnings, "WinPE language packages don't match boot.wim (" + bootSetupInfo.Version + "/" + bootSetupInfo.Architecture + "); boot.wim оставлен без изменений: " + ex.Message);
+            return;
+        }
         var mountDir = Path.Combine(Path.GetTempPath(), "LocalizerIoT-boot-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(mountDir);
         var failed = false;
