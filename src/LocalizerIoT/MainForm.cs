@@ -26,6 +26,15 @@ public sealed class MainForm : Form
     private readonly Button _loadProfile = new() { Text = "Загрузить профиль…", AutoSize = true };
     private readonly Button _exportBundle = new() { Text = "Экспорт офлайн-пакета…", AutoSize = true };
     private readonly CheckBox _useWindowsUpdateForCapabilities = new() { Text = "Разрешить Windows Update только для FOD установленной Windows (не WinRE/обновления ОС)", AutoSize = true, Checked = false };
+    private readonly Label _isoSummary = new() { AutoSize = true, Text = "Исходный ISO ещё не выбран." };
+    private readonly Label _sourceSummary = new() { AutoSize = true, Text = "Языковые источники: не выбраны." };
+    private readonly Label _progressDetail = new() { AutoSize = false, Height = 24, Text = "Готово к работе.", AutoEllipsis = true };
+    private readonly Label _progressPercent = new() { AutoSize = true, Text = "0%", TextAlign = ContentAlignment.MiddleRight };
+    private readonly Button _clearLog = new() { Text = "Очистить", AutoSize = true };
+    private readonly Button _saveLog = new() { Text = "Сохранить журнал…", AutoSize = true };
+    private readonly Button _copyLog = new() { Text = "Копировать", AutoSize = true };
+    private TabControl? _workspaceTabs;
+
     private CancellationTokenSource? _operationCts;
     private readonly ProgressBar _progress = new() { Width = 240, Minimum = 0, Maximum = 100 };
     private readonly TextBox _log = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Font = new Font("Consolas", 9) };
@@ -34,11 +43,15 @@ public sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "Localizer-IoT Alpha 0.9.0.0 — русификация Windows IoT Enterprise LTSC";
-        Width = 1080;
-        Height = 800;
-        MinimumSize = new Size(850, 650);
+        Text = "Localizer-IoT Alpha 0.9.0.1 — русификация Windows IoT Enterprise LTSC";
+        Width = 1180;
+        Height = 860;
+        MinimumSize = new Size(940, 700);
         StartPosition = FormStartPosition.CenterScreen;
+        AutoScaleMode = AutoScaleMode.Font;
+        Font = new Font("Segoe UI", 9.5f, FontStyle.Regular, GraphicsUnit.Point);
+        BackColor = Color.FromArgb(245, 247, 251);
+        ForeColor = Color.FromArgb(35, 47, 62);
         AllowDrop = true;
         BuildLayout();
 
@@ -89,6 +102,18 @@ public sealed class MainForm : Form
         _saveProfile.Click += (_, _) => SaveProfile();
         _loadProfile.Click += (_, _) => LoadProfile();
         _exportBundle.Click += async (_, _) => await ExportOfflineBundleAsync();
+        _clearLog.Click += (_, _) => _log.Clear();
+        _copyLog.Click += (_, _) => CopyLogToClipboard();
+        _saveLog.Click += (_, _) => SaveLogToFile();
+        _iso.TextChanged += (_, _) => RefreshInputSummary();
+        _packageSource.TextChanged += (_, _) => RefreshInputSummary();
+        _fodSource.TextChanged += (_, _) => RefreshInputSummary();
+        _setupSource.TextChanged += (_, _) => RefreshInputSummary();
+        _donorSource.TextChanged += (_, _) => RefreshInputSummary();
+        _output.TextChanged += (_, _) => RefreshInputSummary();
+        _allIndexes.CheckedChanged += (_, _) => _index.Enabled = !_allIndexes.Checked;
+        _index.Enabled = !_allIndexes.Checked;
+        RefreshInputSummary();
 
         Log("Localizer-IoT: исходный ISO копируется во временную папку и не изменяется.");
         Log("Укажите отдельно Language Pack ISO и Languages and Optional Features ISO, если в поставке это разные носители.");
