@@ -1363,4 +1363,10 @@ public sealed class MainForm : Form
         if (InvokeRequired) BeginInvoke(action);
         else action();
     }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _helpTips.Dispose();
+        base.Dispose(disposing);
+    }
 }
