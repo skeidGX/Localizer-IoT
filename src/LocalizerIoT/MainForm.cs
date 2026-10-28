@@ -30,6 +30,7 @@ public sealed class MainForm : Form
     private readonly Label _sourceSummary = new() { AutoSize = true, Text = "Языковые источники: не выбраны." };
     private readonly Label _progressDetail = new() { AutoSize = false, Height = 24, Text = "Готово к работе.", AutoEllipsis = true };
     private readonly Label _progressPercent = new() { AutoSize = true, Text = "0%", TextAlign = ContentAlignment.MiddleRight };
+    private readonly ToolTip _helpTips = new() { AutoPopDelay = 12000, InitialDelay = 500, ReshowDelay = 100, ShowAlways = true };
     private readonly Button _clearLog = new() { Text = "Очистить", AutoSize = true };
     private readonly Button _saveLog = new() { Text = "Сохранить журнал…", AutoSize = true };
     private readonly Button _copyLog = new() { Text = "Копировать", AutoSize = true };
@@ -606,6 +607,16 @@ public sealed class MainForm : Form
         }
         _packages.BackColor = Color.White;
         _packages.ForeColor = Color.FromArgb(35, 47, 62);
+        _helpTips.SetToolTip(_iso, "Исходный английский или многоязычный Windows ISO. Оригинал не изменяется.");
+        _helpTips.SetToolTip(_inspect, "Читает индексы установочного WIM/ESD, версии Windows и архитектуру.");
+        _helpTips.SetToolTip(_autoDownload, "Ищет подходящую базовую сборку, загружает только языковые компоненты и проверяет файлы.");
+        _helpTips.SetToolTip(_packageSource, "Основной Language Pack. Можно указать официальный LP ISO или распакованную папку.");
+        _helpTips.SetToolTip(_fodSource, "Источник языковых Features on Demand: OCR, речь, шрифты и рукописный ввод.");
+        _helpTips.SetToolTip(_setupSource, "Дополнительные ресурсы русской установки Windows в sources\\ru-ru.");
+        _helpTips.SetToolTip(_donorSource, "Совместимый русский ISO используется как источник найденных ресурсов, а не как целевой образ.");
+        _helpTips.SetToolTip(_useWindowsUpdateForCapabilities, "По умолчанию отключено. Не разрешает интеграцию LCU/SSU и не обслуживает WinRE.");
+        _helpTips.SetToolTip(_run, "Создаёт новый загрузочный ISO. Исходный файл не перезаписывается.");
+        _helpTips.SetToolTip(_cancelDownload, "Останавливает поиск и загрузку языка, но не прерывает запущенное обслуживание DISM.");
         _allIndexes.Margin = new Padding(2, 5, 2, 3);
         _index.Margin = new Padding(2, 3, 2, 3);
         _output.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Windows-IoT-LTSC-ru.iso");
@@ -668,6 +679,7 @@ public sealed class MainForm : Form
             row.Controls.Add(diagnosticButton, 4, 0);
         }
 
+        table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         table.Controls.Add(row, 0, rowIndex);
     }
 
