@@ -145,7 +145,7 @@ internal static class ImageServicingEngine
                     else if (File.Exists(fodSource) && Path.GetExtension(fodSource).Equals(".iso", StringComparison.OrdinalIgnoreCase))
                     {
                         fodIsoLetter = MountIso(Path.GetFullPath(fodSource));
-                        packageRoots.Add(fodIsoLetter + @":\\");
+                        packageRoots.Add(fodIsoLetter + @":\");
                     }
                     else throw new InvalidOperationException("Источник Features on Demand должен быть существующей папкой или ISO-файлом.");
                 }
