@@ -60,7 +60,7 @@ internal static class UupLanguagePackDownloader
         log($"Образ: {image.Name}; версия {image.Version}; сборка {targetBuild}; архитектура {arch}. Ищу ru-RU на базе {baseBuild}.");
         progress?.Invoke(3);
 
-        var builds = await FindBuildCandidatesAsync(baseBuild, arch, log, cancellationToken);
+        var builds = await FindBuildCandidatesAsync(targetBuild, baseBuild, arch, log, cancellationToken);
         if (builds.Count == 0)
             throw new InvalidOperationException(
                 $"UUP Dump не вернул подходящий выпуск для базы {baseBuild} и архитектуры {arch}. " +
@@ -187,10 +187,11 @@ internal static class UupLanguagePackDownloader
     }
 
     private static async Task<List<UupBuild>> FindBuildCandidatesAsync(
-        int baseBuild, string architecture, Action<string> log, CancellationToken cancellationToken)
+        int targetBuild, int baseBuild, string architecture, Action<string> log, CancellationToken cancellationToken)
     {
         var all = new Dictionary<string, UupBuild>(StringComparer.OrdinalIgnoreCase);
-        foreach (var search in new[] { $"{baseBuild}.1", baseBuild.ToString() }.Distinct())
+        var buildNumbers = new[] { baseBuild, targetBuild }.Distinct().ToArray();
+        foreach (var search in buildNumbers.SelectMany(b => new[] { $"{b}.1", b.ToString() }).Distinct())
         {
             var url = ApiRoot + "listid.php?search=" + Uri.EscapeDataString(search) + "&sortByDate=0";
             try
@@ -205,7 +206,9 @@ internal static class UupLanguagePackDownloader
                     var id = GetString(item, "uuid");
                     var build = GetString(item, "build");
                     var arch = NormalizeArchitecture(GetString(item, "arch"));
-                    if (string.IsNullOrWhiteSpace(id) || ParseUupBuildNumber(build) != baseBuild ||
+                    var candidateBuild = ParseUupBuildNumber(build);
+                    if (string.IsNullOrWhiteSpace(id) ||
+                        (candidateBuild != baseBuild && candidateBuild != targetBuild) ||
                         !arch.Equals(architecture, StringComparison.OrdinalIgnoreCase))
                         continue;
                     var title = GetString(item, "title");
@@ -219,11 +222,13 @@ internal static class UupLanguagePackDownloader
             }
         }
 
-        // Prefer the initial servicing baseline rather than downloading a newer cumulative release.
+        // Prefer the shared language-pack baseline first, but retain exact target-build
+        // candidates as a fallback. We never apply OS cumulative-update packages.
         return all.Values
-            .OrderBy(b => GetBuildRevision(b.Build))
+            .OrderBy(b => ParseUupBuildNumber(b.Build) == baseBuild ? 0 : 1)
+            .ThenBy(b => GetBuildRevision(b.Build))
             .ThenBy(b => b.Created)
-            .Take(12)
+            .Take(16)
             .ToList();
     }
 
