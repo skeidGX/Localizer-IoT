@@ -16,7 +16,8 @@ internal sealed record LocalizationRequest(
     string[] ExplicitCabFiles,
     string OutputIso,
     bool AllIndexes,
-    int SelectedIndex);
+    int SelectedIndex,
+    bool AllowWindowsUpdateForCapabilities = false);
 
 internal static class ImageServicingEngine
 {
@@ -373,9 +374,9 @@ internal static class ImageServicingEngine
                 try
                 {
                     ApplyCabPackages(dism, mountDir, windowsPackages, imageInfo.Version, imageInfo.Architecture, warnings, report, progress, 25, 40);
-                    TryAddLanguageCapabilities(dism, mountDir, packages.ToArray(), capabilitySources, warnings, report, progress);
+                    TryAddLanguageCapabilities(dism, mountDir, packages.ToArray(), capabilitySources, warnings, report, progress, request.AllowWindowsUpdateForCapabilities);
                     SetRussianDefaults(dism, mountDir, warnings, report, progress);
-                    TryServiceWinRe(dism, mountDir, work, windowsPackages, packages.ToArray(), capabilitySources, warnings, report, progress);
+                    TryServiceWinRe(dism, mountDir, work, windowsPackages, packages.ToArray(), capabilitySources, warnings, report, progress, request.AllowWindowsUpdateForCapabilities);
                     var langIni = Run(dism, "/Image:" + mountDir, "/Gen-LangINI", "/Distribution:" + stage);
                     if (langIni.ExitCode != 0) AddWarning(warnings, "DISM /Gen-LangINI не сработал: " + ShortOutput(langIni.Output));
                     var unmount = Run(dism, "/Unmount-Image", "/MountDir:" + mountDir, "/Commit", "/CheckIntegrity");
@@ -436,6 +437,8 @@ internal static class ImageServicingEngine
             reportText.AppendLine("Russian donor media: " + (string.IsNullOrWhiteSpace(request.RussianDonorMedia) ? "(not specified)" : request.RussianDonorMedia));
             reportText.AppendLine("Architecture: " + architecture);
             reportText.AppendLine("Image indexes serviced: " + string.Join(", ", installIndices));
+            reportText.AppendLine("Windows Update for language capabilities only: " + (request.AllowWindowsUpdateForCapabilities ? "enabled by user" : "disabled"));
+            reportText.AppendLine("Windows OS updates integrated: no");
             reportText.AppendLine("Language packages:");
             foreach (var package in windowsPackages) reportText.AppendLine("  " + package);
             reportText.AppendLine("Warnings / incomplete localization:");
@@ -560,14 +563,16 @@ internal static class ImageServicingEngine
     }
 
     private static void TryAddLanguageCapabilities(string dism, string mountDir, string[] packages, string[] capabilitySources, List<string> warnings,
-        Action<int, string> report, int progress)
+        Action<int, string> report, int progress, bool allowWindowsUpdate = false)
     {
         var fodPackagesExist = packages.Any(IsLanguageFeatureSatellite);
-        if (!fodPackagesExist)
+        if (!fodPackagesExist && !allowWindowsUpdate)
         {
             AddWarning(warnings, "В предоставленном источнике не обнаружены Russian Language Features on Demand; OCR/речь/рукописный ввод могут остаться на английском или отсутствовать.");
             return;
         }
+        if (!fodPackagesExist && allowWindowsUpdate)
+            report(progress, "Локальные языковые FOD не найдены. Разрешён отдельный запрос только языковых возможностей через Windows Update; обновления ОС не запрашиваются.");
 
         var capabilities = new[]
         {
@@ -581,11 +586,6 @@ internal static class ImageServicingEngine
         foreach (var cap in capabilities)
         {
             var sources = capabilitySources;
-            if (sources.Length == 0)
-            {
-                AddWarning(warnings, $"Не найден источник FOD для {cap}.");
-                continue;
-            }
             var done = false;
             foreach (var source in sources)
             {
@@ -600,6 +600,18 @@ internal static class ImageServicingEngine
                 if (!result.Output.Contains("0x800f081f", StringComparison.OrdinalIgnoreCase) &&
                     !result.Output.Contains("source files could not be found", StringComparison.OrdinalIgnoreCase))
                     AddWarning(warnings, $"DISM не смог добавить FOD {cap}: {ShortOutput(result.Output)}");
+            }
+            if (!done && allowWindowsUpdate)
+            {
+                report(progress + 1, $"Пробую получить языковую возможность через настроенный Windows Update: {cap}");
+                var online = Run(dism, "/Image:" + mountDir, "/Add-Capability", "/CapabilityName:" + cap);
+                if (online.ExitCode == 0 || online.Output.Contains("already installed", StringComparison.OrdinalIgnoreCase))
+                {
+                    report(progress + 2, $"Языковая возможность получена из источника Windows Update: {cap}");
+                    done = true;
+                }
+                else
+                    AddWarning(warnings, $"Windows Update не смог предоставить FOD {cap}: {ShortOutput(online.Output)}");
             }
             if (!done) AddWarning(warnings, $"FOD {cap} не установлен: отсутствует совместимый источник или компонент не поддерживается данным выпуском.");
         }
@@ -643,7 +655,8 @@ internal static class ImageServicingEngine
     }
 
     private static void TryServiceWinRe(string dism, string windowsMount, string work, string[] windowsPackages,
-        string[] allLanguagePackages, string[] capabilitySources, List<string> warnings, Action<int, string> report, int progress)
+        string[] allLanguagePackages, string[] capabilitySources, List<string> warnings, Action<int, string> report, int progress,
+        bool allowWindowsUpdate = false)
     {
         var winre = Path.Combine(windowsMount, "Windows", "System32", "Recovery", "winre.wim");
         if (!File.Exists(winre))
@@ -675,7 +688,7 @@ internal static class ImageServicingEngine
                 if (add.ExitCode != 0)
                     throw new InvalidOperationException($"Не удалось добавить русский Language Pack в WinRE ({Path.GetFileName(cab)}): {ShortOutput(add.Output)}");
             }
-            TryAddLanguageCapabilities(dism, winreMount, allLanguagePackages, capabilitySources, warnings, report, progress + 2);
+            TryAddLanguageCapabilities(dism, winreMount, allLanguagePackages, capabilitySources, warnings, report, progress + 2, allowWindowsUpdate);
             var intl = Run(dism, "/Image:" + winreMount, "/Set-AllIntl:ru-RU");
             if (intl.ExitCode != 0) AddWarning(warnings, "Не удалось настроить locale ru-RU в WinRE: " + ShortOutput(intl.Output));
             var commit = Run(dism, "/Unmount-Image", "/MountDir:" + winreMount, "/Commit", "/CheckIntegrity");
