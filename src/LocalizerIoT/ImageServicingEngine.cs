@@ -104,9 +104,9 @@ internal static class ImageServicingEngine
             packageRoots.AddRange(request.ExplicitCabFiles.Where(File.Exists).Select(Path.GetDirectoryName).Where(p => p is not null).Cast<string>());
             packageRoots = packageRoots.Distinct(PathComparer).ToList();
 
-            var packages = DiscoverRussianPackages(packageRoots, request.ExplicitCabFiles);
+            var discoveredPackages = DiscoverRussianPackages(packageRoots, request.ExplicitCabFiles);
             var architecture = DetectArchitectureFromMedia(stage, dism);
-            packages = FilterForArchitecture(packages, architecture, report);
+            var packages = FilterForArchitecture(discoveredPackages, architecture, report);
             var capabilitySources = FindCapabilitySources(packageRoots);
             var windowsPackages = packages.Where(p => !IsWinPePackage(p) && !IsLanguageFeatureSatellite(p)).Distinct(PathComparer)
                 .OrderByDescending(IsCoreLanguagePack).ThenBy(p => p, PathComparer).ToArray();
@@ -570,7 +570,7 @@ internal static class ImageServicingEngine
                 foreach (var file in Directory.EnumerateFiles(root, "*.cab", SearchOption.AllDirectories))
                     if (IsRussianPath(file)) found.Add(Path.GetFullPath(file));
             }
-            catch (Exception ex) { /* inaccessible folder is reported by the lack of packages below */ }
+            catch { /* inaccessible folder is reported by the lack of packages below */ }
         }
         return found.OrderBy(p => p, PathComparer).ToArray();
     }
