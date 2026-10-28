@@ -448,7 +448,9 @@ public sealed class MainForm : Form
 
         var hasOscdimg = ImageServicingEngine.FindOscdimgPath() is not null;
         var extraWinPeRoots = new[] { _packageSource.Text.Trim(), _fodSource.Text.Trim(), _setupSource.Text.Trim(), _donorSource.Text.Trim() }
-            .Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            .Where(p => Directory.Exists(p) ||
+                (File.Exists(p) && Path.GetExtension(p).Equals(".iso", StringComparison.OrdinalIgnoreCase)))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var hasCompatibleWinPe = await Task.Run(() =>
             ImageServicingEngine.HasCompatibleWinPePackages(_iso.Text.Trim(), extraWinPeRoots, Log));
 
