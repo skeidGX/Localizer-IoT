@@ -41,7 +41,18 @@ jobs:
           RELEASE_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           $firstLine = ($env:RELEASE_COMMIT_MESSAGE -split "`n")[0].Trim()
-          if ($firstLine -match '^release:\s*(v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\s*$') {
+          if ($firstLine -match '^release:\s*(v\d+\.\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?)\s*
+            $tag = $Matches[1]
+          } else {
+            throw "Release commit message must be: release: vMAJOR.MINOR.PATCH[.REVISION][-prerelease]"
+          }
+          gh release view $tag --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Release/tag $tag already exists. Refusing to overwrite it."
+          }
+          $releaseVersion = $tag.Substring(1)
+          gh release create $tag "artifacts/Localizer-IoT-win-x64/Localizer-IoT.exe" --repo "${{ github.repository }}" --title "Localizer-IoT Alpha $releaseVersion" --notes-file CHANGELOG.md --prerelease
+) {
             $tag = $Matches[1]
           } else {
             throw "Release commit message must be: release: vMAJOR.MINOR.PATCH[-prerelease]"
