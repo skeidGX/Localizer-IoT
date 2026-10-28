@@ -142,15 +142,26 @@ internal static class UupLanguagePackDownloader
                         cancellationToken.ThrowIfCancellationRequested();
                         var esd = orderedEsdFiles[i];
                         var cab = Path.ChangeExtension(esd, ".cab");
-                        if (File.Exists(cab) && new FileInfo(cab).Length > 0)
+                        if (File.Exists(cab) && new FileInfo(cab).Length > 0 && await VerifyCabPackageAsync(cab, cancellationToken))
                         {
                             ready++;
                             if (IsFeaturePackageFile(cab)) fodReady++;
+                            log("  CAB cache verified by DISM: " + Path.GetFileName(cab));
                             continue;
                         }
-                        log($"Преобразую языковой ESD в CAB ({i + 1}/{esdFiles.Count}): {Path.GetFileName(esd)}");
+                        if (File.Exists(cab))
+                        {
+                            log("  Удаляю некорректный/нечитаемый CAB из кеша: " + Path.GetFileName(cab));
+                            try { File.Delete(cab); } catch { }
+                        }
+                        log($"Преобразую языковой ESD в CAB ({i + 1}/{orderedEsdFiles.Length}): {Path.GetFileName(esd)}");
                         progress?.Invoke(Math.Clamp(42 + (int)(20.0 * i / Math.Max(1, orderedEsdFiles.Length)), 42, 62));
                         await ConvertEsdToCabAsync(esd, cab, cacheRoot, converter, log, cancellationToken);
+                        if (!await VerifyCabPackageAsync(cab, cancellationToken))
+                        {
+                            try { File.Delete(cab); } catch { }
+                            throw new InvalidDataException("Созданный CAB не проходит проверку метаданных DISM: " + Path.GetFileName(cab));
+                        }
                         ready++;
                         if (IsFeaturePackageFile(cab)) fodReady++;
                     }
@@ -482,6 +493,24 @@ internal static class UupLanguagePackDownloader
             1024 * 256, FileOptions.Asynchronous | FileOptions.SequentialScan);
         var hash = await SHA1.HashDataAsync(stream, cancellationToken);
         return Convert.ToHexString(hash).Equals(expectedSha1, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<bool> VerifyCabPackageAsync(string cabPath, CancellationToken cancellationToken)
+    {
+        if (!File.Exists(cabPath) || new FileInfo(cabPath).Length < 1024) return false;
+        var dism = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "dism.exe");
+        if (!File.Exists(dism)) return false;
+        try
+        {
+            var result = await RunProcessAsync(dism,
+                new[] { "/English", "/Get-PackageInfo", "/PackagePath:" + cabPath },
+                Environment.CurrentDirectory, cancellationToken);
+            return result.ExitCode == 0 &&
+                (result.Output.Contains("Package Identity", StringComparison.OrdinalIgnoreCase) ||
+                 result.Output.Contains("Identity", StringComparison.OrdinalIgnoreCase));
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { return false; }
     }
 
     private sealed record ConverterTools(string Root, string ImageX, string SxsExpand, string CabArc);
