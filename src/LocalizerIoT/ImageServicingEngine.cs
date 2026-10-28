@@ -12,6 +12,7 @@ internal sealed record LocalizationRequest(
     string? PackageSource,
     string? FodSource,
     string? RussianSetupMedia,
+    string? RussianDonorMedia,
     string[] ExplicitCabFiles,
     string OutputIso,
     bool AllIndexes,
@@ -58,6 +59,84 @@ internal static class ImageServicingEngine
         }
     }
 
+    public static void InspectRussianDonor(string mediaPath, Action<string> log)
+    {
+        var path = mediaPath?.Trim() ?? "";
+        if (string.IsNullOrWhiteSpace(path) || (!Directory.Exists(path) &&
+            !(File.Exists(path) && Path.GetExtension(path).Equals(".iso", StringComparison.OrdinalIgnoreCase))))
+            throw new InvalidOperationException("Выберите существующий русский ISO-донор или папку с распакованными файлами Windows.");
+
+        string? mountedLetter = null;
+        var mediaRoot = "";
+        var isoPath = File.Exists(path) ? Path.GetFullPath(path) : null;
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                mediaRoot = Path.GetFullPath(path);
+                log("Проверяю папку с донорскими ресурсами: " + mediaRoot);
+            }
+            else
+            {
+                log("Подключаю русский ISO-донор для анализа…");
+                mountedLetter = MountIso(isoPath!);
+                mediaRoot = mountedLetter + ":" + Path.DirectorySeparatorChar;
+            }
+
+            var installImage = new[]
+            {
+                Path.Combine(mediaRoot, "sources", "install.wim"),
+                Path.Combine(mediaRoot, "sources", "install.esd")
+            }.FirstOrDefault(File.Exists);
+            if (installImage is not null)
+            {
+                var dism = FindDism() ?? throw new InvalidOperationException("DISM.exe не найден.");
+                var info = ReadFirstImageInfo(dism, installImage);
+                log($"Образ-донор: {info.Name}; версия {info.Version}; архитектура {info.Architecture}.");
+            }
+            else
+            {
+                log("Предупреждение: sources\\install.wim/esd не найден; версию донора автоматически проверить нельзя.");
+            }
+
+            var sourcesRoot = Path.Combine(mediaRoot, "sources");
+            log(Directory.Exists(Path.Combine(sourcesRoot, "ru-ru"))
+                ? "Найдены локализованные ресурсы Setup: sources\\ru-ru."
+                : "Не найдена папка sources\\ru-ru — русские экраны Setup из этого источника взять не получится.");
+
+            var packages = new List<string>();
+            try
+            {
+                foreach (var file in Directory.EnumerateFiles(mediaRoot, "*.cab", SearchOption.AllDirectories).Take(20000))
+                {
+                    if (IsRussianPath(file) && !IsLikelyWindowsUpdatePackage(file) && IsPotentialLanguageComponent(file))
+                        packages.Add(file);
+                }
+            }
+            catch (Exception ex)
+            {
+                log("Не удалось полностью просканировать CAB-файлы донора: " + ex.Message);
+            }
+
+            var coreCount = packages.Count(IsCoreLanguagePack);
+            var fodCount = packages.Count(IsLanguageFeatureSatellite);
+            var winPeCount = packages.Count(IsWinPePackage);
+            log($"Найдено языковых CAB-кандидатов ru-RU: {packages.Count}; основной Language Pack: {coreCount}; языковые FOD: {fodCount}; WinPE/Setup CAB: {winPeCount}.");
+            foreach (var file in packages.Take(20))
+                log("  " + Path.GetRelativePath(mediaRoot, file));
+            if (coreCount == 0)
+                log("ВАЖНО: отдельный основной Language Pack CAB в доноре не найден. Сам факт, что русский язык уже встроен в install.wim, не даёт безопасного исходного CAB для другого образа; понадобится совместимый Language Pack ISO/папка/CAB.");
+            if (fodCount == 0)
+                log("Языковые FOD не найдены. OCR, речь, рукописный ввод и другие дополнительные возможности могут потребовать отдельный Languages and Optional Features источник.");
+            if (winPeCount == 0)
+                log("Отдельные WinPE language CAB в доноре не найдены; для русификации Setup может понадобиться соответствующий WinPE language add-on.");
+        }
+        finally
+        {
+            if (mountedLetter is not null && isoPath is not null) TryDismountIso(isoPath);
+        }
+    }
+
     public static void Run(LocalizationRequest request, Action<int, string> report)
     {
         var warnings = new List<string>();
@@ -96,6 +175,8 @@ internal static class ImageServicingEngine
         string? fodIsoLetter = null;
         string? setupMediaLetter = null;
         string? setupMediaRoot = null;
+        string? donorIsoLetter = null;
+        string? donorMediaRoot = null;
         var mountDir = Path.Combine(work, "mount");
         var currentMount = false;
 
@@ -153,6 +234,69 @@ internal static class ImageServicingEngine
                     else throw new InvalidOperationException("Источник Features on Demand должен быть существующей папкой или ISO-файлом.");
                 }
             }
+            if (!string.IsNullOrWhiteSpace(request.RussianDonorMedia))
+            {
+                var donorPath = request.RussianDonorMedia.Trim();
+                if (Directory.Exists(donorPath))
+                {
+                    donorMediaRoot = Path.GetFullPath(donorPath);
+                }
+                else if (File.Exists(donorPath) && Path.GetExtension(donorPath).Equals(".iso", StringComparison.OrdinalIgnoreCase))
+                {
+                    var fullDonorPath = Path.GetFullPath(donorPath);
+                    if (!string.IsNullOrWhiteSpace(request.PackageSource) &&
+                        File.Exists(request.PackageSource.Trim()) &&
+                        PathComparer.Equals(fullDonorPath, Path.GetFullPath(request.PackageSource.Trim())) &&
+                        packageRoot is not null)
+                    {
+                        donorMediaRoot = packageRoot;
+                    }
+                    else if (!string.IsNullOrWhiteSpace(request.RussianSetupMedia) &&
+                        File.Exists(request.RussianSetupMedia.Trim()) &&
+                        PathComparer.Equals(fullDonorPath, Path.GetFullPath(request.RussianSetupMedia.Trim())) &&
+                        setupMediaRoot is not null)
+                    {
+                        donorMediaRoot = setupMediaRoot;
+                    }
+                    else if (!string.IsNullOrWhiteSpace(request.FodSource) &&
+                        File.Exists(request.FodSource.Trim()) &&
+                        PathComparer.Equals(fullDonorPath, Path.GetFullPath(request.FodSource.Trim())) &&
+                        fodIsoLetter is not null)
+                    {
+                        donorMediaRoot = fodIsoLetter + ":" + Path.DirectorySeparatorChar;
+                    }
+                    else
+                    {
+                        donorIsoLetter = MountIso(fullDonorPath);
+                        donorMediaRoot = donorIsoLetter + ":" + Path.DirectorySeparatorChar;
+                    }
+                }
+                else
+                {
+                    throw new InvalidOperationException("Русский ISO-донор должен быть существующей папкой или ISO-файлом.");
+                }
+
+                packageRoots.Add(donorMediaRoot);
+                report(6, "Добавлен русский ISO-донор: поиск Language Pack, FOD, WinPE и ресурсов sources\\ru-ru.");
+                var donorInstallImage = new[]
+                {
+                    Path.Combine(donorMediaRoot, "sources", "install.wim"),
+                    Path.Combine(donorMediaRoot, "sources", "install.esd")
+                }.FirstOrDefault(File.Exists);
+                if (donorInstallImage is not null)
+                {
+                    try
+                    {
+                        var donorInfo = ReadFirstImageInfo(dism, donorInstallImage);
+                        report(6, $"Метаданные донора: {donorInfo.Name}; версия {donorInfo.Version}; архитектура {donorInfo.Architecture}.");
+                    }
+                    catch (Exception ex)
+                    {
+                        warnings.Add("Не удалось прочитать метаданные русского ISO-донора: " + ex.Message);
+                    }
+                }
+            }
+
             packageRoots.AddRange(request.ExplicitCabFiles.Where(File.Exists).Select(Path.GetDirectoryName).Where(p => p is not null).Cast<string>());
             packageRoots = packageRoots.Distinct(PathComparer).ToList();
 
@@ -171,7 +315,7 @@ internal static class ImageServicingEngine
             var windowsPackages = packages.Where(p => !IsWinPePackage(p) && !IsLanguageFeatureSatellite(p)).Distinct(PathComparer)
                 .OrderByDescending(IsCoreLanguagePack).ThenBy(p => p, PathComparer).ToArray();
             if (!windowsPackages.Any(IsCoreLanguagePack))
-                throw new InvalidOperationException("Не найден основной CAB-пакет русского языка для Windows (например, Microsoft-Windows-Client-Language-Pack_x64_ru-ru.cab). Укажите подходящий Language Pack ISO или папку с пакетами ru-RU. Неподходящие пакеты автоматически не скачиваются.");
+                throw new InvalidOperationException("Не найден отдельный основной CAB-пакет русского языка для Windows (например, Microsoft-Windows-Client-Language-Pack_x64_ru-ru.cab). Русский ISO-донор автоматически просканирован, но встроенный в его install.wim язык нельзя безопасно превратить в исходный CAB для другого образа. Укажите совместимый Language Pack ISO/папку/CAB или попробуйте автоматическую загрузку UUP Dump.");
             report(8, $"Обнаружена архитектура: {architecture}. Основных CAB/FOD-кандидатов: {packages.Count}; пакетов для Windows: {windowsPackages.Length}.");
 
             CopyRussianSetupResources(packageRoots, setupMediaRoot, stage, targetImageInfo.Version, architecture, dism, warnings, report);
@@ -289,6 +433,7 @@ internal static class ImageServicingEngine
             reportText.AppendLine("Localizer-IoT report");
             reportText.AppendLine("Source ISO: " + sourceIso);
             reportText.AppendLine("Output ISO: " + outputIso);
+            reportText.AppendLine("Russian donor media: " + (string.IsNullOrWhiteSpace(request.RussianDonorMedia) ? "(not specified)" : request.RussianDonorMedia));
             reportText.AppendLine("Architecture: " + architecture);
             reportText.AppendLine("Image indexes serviced: " + string.Join(", ", installIndices));
             reportText.AppendLine("Language packages:");
@@ -317,6 +462,8 @@ internal static class ImageServicingEngine
                 TryDismountIso(Path.GetFullPath(request.RussianSetupMedia));
             if (fodIsoLetter is not null && !string.IsNullOrWhiteSpace(request.FodSource))
                 TryDismountIso(Path.GetFullPath(request.FodSource));
+            if (donorIsoLetter is not null && !string.IsNullOrWhiteSpace(request.RussianDonorMedia))
+                TryDismountIso(Path.GetFullPath(request.RussianDonorMedia));
             try { Run(dism, "/Cleanup-Wim"); } catch { }
             try { Directory.Delete(work, true); } catch { }
             try { if (File.Exists(tempOutputIso)) File.Delete(tempOutputIso); } catch { }
