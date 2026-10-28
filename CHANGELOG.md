@@ -6,6 +6,7 @@ All notable changes to Localizer-IoT are documented here.
 
 ### Added
 - Added JSON save/load profiles for source paths, explicit CAB list, output path, selected image indexes, and the opt-in language-capability Windows Update setting.
+- Added offline ZIP export for matching Russian Language Pack/FOD/WinPE CAB files and Setup `sources\\ru-ru` resources already present in selected extracted folders. The archive includes a per-file SHA-256 manifest and excludes likely OS update packages.
 - Added local SHA-256 cache manifests for DISM-readable CAB payloads and fallback to a matching verified cache if online UUP discovery/download cannot provide a usable package.
 - Added up to three parallel UUP payload transfers, retry/backoff for temporary network/API failures, HTTP Range continuation for partial payloads, and refreshed payload URLs after expiry/authorization errors.
 - Added a visible cancellation action for UUP discovery/download; verified cache entries are reused and incomplete `.partial` downloads are retained for possible resumption.
