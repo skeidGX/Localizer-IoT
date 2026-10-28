@@ -608,6 +608,158 @@ public sealed class MainForm : Form
         _output.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Windows-IoT-LTSC-ru.iso");
     }
 
+    private void AddMediaSourceRow(TableLayoutPanel table, int rowIndex, string caption, TextBox target,
+        string isoTitle, string folderTitle, Button? diagnosticButton = null)
+    {
+        var row = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            ColumnCount = diagnosticButton is null ? 4 : 5,
+            RowCount = 1,
+            Margin = new Padding(0, 2, 0, 5),
+            Padding = new Padding(0, 1, 0, 1)
+        };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 168));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        if (diagnosticButton is not null) row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+        row.Controls.Add(new Label
+        {
+            Text = caption,
+            AutoSize = true,
+            MaximumSize = new Size(162, 0),
+            Anchor = AnchorStyles.Left,
+            Font = new Font("Segoe UI", 9.25f, FontStyle.Bold),
+            ForeColor = Color.FromArgb(47, 64, 84),
+            Margin = new Padding(3, 8, 6, 4)
+        }, 0, 0);
+        target.Dock = DockStyle.Fill;
+        row.Controls.Add(target, 1, 0);
+
+        var isoButton = new Button { Text = "ISO…", AutoSize = true };
+        StylePickerButton(isoButton);
+        isoButton.Click += (_, _) =>
+        {
+            using var dialog = new OpenFileDialog { Filter = "ISO-образы (*.iso)|*.iso", Title = isoTitle };
+            if (dialog.ShowDialog(this) == DialogResult.OK) target.Text = dialog.FileName;
+        };
+        row.Controls.Add(isoButton, 2, 0);
+
+        var folderButton = new Button { Text = "Папка…", AutoSize = true };
+        StylePickerButton(folderButton);
+        folderButton.Click += (_, _) =>
+        {
+            using var dialog = new FolderBrowserDialog { Description = folderTitle };
+            if (dialog.ShowDialog(this) == DialogResult.OK) target.Text = dialog.SelectedPath;
+        };
+        row.Controls.Add(folderButton, 3, 0);
+
+        if (diagnosticButton is not null)
+        {
+            diagnosticButton.Text = "Проверить";
+            diagnosticButton.AutoSize = true;
+            StylePickerButton(diagnosticButton, true);
+            row.Controls.Add(diagnosticButton, 4, 0);
+        }
+
+        table.Controls.Add(row, 0, rowIndex);
+    }
+
+    private static void StylePickerButton(Button button, bool accent = false)
+    {
+        button.FlatStyle = FlatStyle.Flat;
+        button.FlatAppearance.BorderSize = 1;
+        button.FlatAppearance.BorderColor = Color.FromArgb(207, 216, 226);
+        button.BackColor = accent ? Color.FromArgb(222, 241, 244) : Color.FromArgb(249, 250, 252);
+        button.ForeColor = accent ? Color.FromArgb(26, 94, 112) : Color.FromArgb(42, 58, 78);
+        button.Padding = new Padding(8, 4, 8, 4);
+        button.Margin = new Padding(3);
+        button.Cursor = Cursors.Hand;
+    }
+
+    private void RefreshInputSummary()
+    {
+        var iso = _iso.Text.Trim();
+        if (File.Exists(iso) && Path.GetExtension(iso).Equals(".iso", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var info = new FileInfo(iso);
+                _isoSummary.Text = $"Выбран: {info.Name}  ·  {info.Length / 1073741824d:0.00} ГиБ";
+                _isoSummary.ForeColor = Color.FromArgb(34, 119, 86);
+            }
+            catch
+            {
+                _isoSummary.Text = "Исходный ISO выбран.";
+                _isoSummary.ForeColor = Color.FromArgb(83, 101, 122);
+            }
+        }
+        else
+        {
+            _isoSummary.Text = "Выберите ISO-файл Windows или перетащите его сюда.";
+            _isoSummary.ForeColor = Color.FromArgb(151, 94, 28);
+        }
+
+        var paths = new[] { _packageSource.Text.Trim(), _fodSource.Text.Trim(), _setupSource.Text.Trim(), _donorSource.Text.Trim() };
+        var selected = paths.Count(p => !string.IsNullOrWhiteSpace(p));
+        var valid = paths.Count(p => string.IsNullOrWhiteSpace(p) || Directory.Exists(p) ||
+            (File.Exists(p) && Path.GetExtension(p).Equals(".iso", StringComparison.OrdinalIgnoreCase)));
+        _sourceSummary.Text = selected == 0
+            ? "Отдельные источники не выбраны — можно попробовать автоматический поиск ru-RU."
+            : $"Дополнительные источники: {selected} из 4  ·  {(valid == paths.Length ? "пути проверены" : "проверьте доступность выбранных путей")}";
+        _sourceSummary.ForeColor = valid == paths.Length ? Color.FromArgb(83, 101, 122) : Color.FromArgb(170, 70, 54);
+    }
+
+    private void SetProgressUi(int value)
+    {
+        value = Math.Clamp(value, _progress.Minimum, _progress.Maximum);
+        _progress.Value = value;
+        _progressPercent.Text = $"{value}%";
+    }
+
+    private void CopyLogToClipboard()
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_log.Text))
+            {
+                Log("Журнал пуст.");
+                return;
+            }
+            Clipboard.SetText(_log.Text);
+            Log("Журнал скопирован в буфер обмена.");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Не удалось скопировать журнал", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private void SaveLogToFile()
+    {
+        using var dialog = new SaveFileDialog
+        {
+            Filter = "Текстовый журнал (*.log;*.txt)|*.log;*.txt|Все файлы (*.*)|*.*",
+            FileName = "Localizer-IoT.log",
+            DefaultExt = "log",
+            AddExtension = true,
+            Title = "Сохранить журнал обработки"
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            File.WriteAllText(dialog.FileName, _log.Text, new UTF8Encoding(false));
+            Log("Журнал сохранён: " + dialog.FileName);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Не удалось сохранить журнал", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
     private void OnDragEnter(object? sender, DragEventArgs e)
     {
         if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true) e.Effect = DragDropEffects.Copy;
@@ -920,6 +1072,8 @@ public sealed class MainForm : Form
         _busy = busy;
         _inspect.Enabled = _inspectDonor.Enabled = _autoDownload.Enabled = _browseCab.Enabled = _run.Enabled = !busy;
         _saveProfile.Enabled = _loadProfile.Enabled = _exportBundle.Enabled = !busy;
+        _clearLog.Enabled = _saveLog.Enabled = _copyLog.Enabled = !busy;
+        if (_workspaceTabs is not null) _workspaceTabs.Enabled = !busy;
         _cancelDownload.Enabled = busy && _operationCts is not null;
         Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
     }
@@ -1168,6 +1322,23 @@ public sealed class MainForm : Form
         {
             _log.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
             _status.Text = message;
+            _progressDetail.Text = message;
+            var lower = message.ToLowerInvariant();
+            if (lower.Contains("ошибка") || lower.Contains("error") || lower.Contains("не удалось") || lower.Contains("остановлена"))
+            {
+                _status.ForeColor = Color.FromArgb(150, 49, 42);
+                _status.BackColor = Color.FromArgb(252, 234, 231);
+            }
+            else if (lower.Contains("предупреждение") || lower.Contains("warning") || lower.Contains("частично"))
+            {
+                _status.ForeColor = Color.FromArgb(137, 83, 22);
+                _status.BackColor = Color.FromArgb(255, 244, 222);
+            }
+            else
+            {
+                _status.ForeColor = Color.FromArgb(47, 72, 95);
+                _status.BackColor = Color.FromArgb(231, 237, 244);
+            }
         });
     }
 
