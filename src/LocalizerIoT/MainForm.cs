@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 
 namespace LocalizerIoT;
 
@@ -20,6 +21,8 @@ public sealed class MainForm : Form
     private readonly Button _browseCab = new() { Text = "Добавить CAB…", AutoSize = true };
     private readonly Button _run = new() { Text = "Создать русифицированный ISO", AutoSize = true };
     private readonly Button _cancelDownload = new() { Text = "Отменить загрузку", AutoSize = true, Enabled = false };
+    private readonly Button _saveProfile = new() { Text = "Сохранить профиль…", AutoSize = true };
+    private readonly Button _loadProfile = new() { Text = "Загрузить профиль…", AutoSize = true };
     private readonly CheckBox _useWindowsUpdateForCapabilities = new() { Text = "Разрешить Windows Update только для недостающих языковых FOD (не обновляет ОС)", AutoSize = true, Checked = false };
     private CancellationTokenSource? _operationCts;
     private readonly ProgressBar _progress = new() { Width = 240, Minimum = 0, Maximum = 100 };
@@ -81,6 +84,8 @@ public sealed class MainForm : Form
         _browseCab.Click += (_, _) => SelectCabFiles();
         _run.Click += async (_, _) => await RunLocalizationAsync();
         _cancelDownload.Click += (_, _) => CancelCurrentDownload();
+        _saveProfile.Click += (_, _) => SaveProfile();
+        _loadProfile.Click += (_, _) => LoadProfile();
 
         Log("Localizer-IoT: исходный ISO копируется во временную папку и не изменяется.");
         Log("Укажите отдельно Language Pack ISO и Languages and Optional Features ISO, если в поставке это разные носители.");
@@ -238,6 +243,8 @@ public sealed class MainForm : Form
         options.Controls.Add(_autoDownload);
         options.Controls.Add(_cancelDownload);
         options.Controls.Add(_useWindowsUpdateForCapabilities);
+        options.Controls.Add(_saveProfile);
+        options.Controls.Add(_loadProfile);
         options.Controls.Add(new Label { Text = "Выходной ISO:", AutoSize = true, Padding = new Padding(8, 5, 0, 0) });
         _output.Width = 250;
         _output.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Windows-IoT-LTSC-ru.iso");
@@ -573,6 +580,77 @@ public sealed class MainForm : Form
         _inspect.Enabled = _inspectDonor.Enabled = _autoDownload.Enabled = _browseCab.Enabled = _run.Enabled = !busy;
         _cancelDownload.Enabled = busy && _operationCts is not null;
         Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
+    }
+
+    private sealed record LocalizationProfile(
+        int FormatVersion,
+        string? SourceIso,
+        string? PackageSource,
+        string? FodSource,
+        string? SetupSource,
+        string? DonorSource,
+        string? ExplicitCabFiles,
+        string? OutputIso,
+        bool AllIndexes,
+        int SelectedIndex,
+        bool AllowWindowsUpdateForCapabilities);
+
+    private void SaveProfile()
+    {
+        using var dialog = new SaveFileDialog
+        {
+            Filter = "Профиль Localizer-IoT (*.json)|*.json",
+            DefaultExt = "json",
+            AddExtension = true,
+            FileName = "Localizer-IoT-profile.json",
+            Title = "Сохранить настройки источников и русификации"
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            var profile = new LocalizationProfile(
+                1, _iso.Text.Trim(), _packageSource.Text.Trim(), _fodSource.Text.Trim(),
+                _setupSource.Text.Trim(), _donorSource.Text.Trim(), _packages.Text,
+                _output.Text.Trim(), _allIndexes.Checked, (int)_index.Value,
+                _useWindowsUpdateForCapabilities.Checked);
+            File.WriteAllText(dialog.FileName, JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
+            Log("Профиль сохранён: " + dialog.FileName);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Не удалось сохранить профиль", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void LoadProfile()
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Filter = "Профиль Localizer-IoT (*.json)|*.json|Все файлы (*.*)|*.*",
+            Title = "Загрузить настройки источников и русификации"
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            var profile = JsonSerializer.Deserialize<LocalizationProfile>(File.ReadAllText(dialog.FileName))
+                ?? throw new InvalidDataException("Файл не содержит профиль Localizer-IoT.");
+            if (profile.FormatVersion != 1) throw new InvalidDataException("Неподдерживаемая версия профиля: " + profile.FormatVersion);
+            _iso.Text = profile.SourceIso ?? "";
+            _packageSource.Text = profile.PackageSource ?? "";
+            _fodSource.Text = profile.FodSource ?? "";
+            _setupSource.Text = profile.SetupSource ?? "";
+            _donorSource.Text = profile.DonorSource ?? "";
+            _packages.Text = profile.ExplicitCabFiles ?? "";
+            _output.Text = profile.OutputIso ?? "";
+            _allIndexes.Checked = profile.AllIndexes;
+            _index.Value = Math.Clamp(profile.SelectedIndex, (int)_index.Minimum, (int)_index.Maximum);
+            _useWindowsUpdateForCapabilities.Checked = profile.AllowWindowsUpdateForCapabilities;
+            Log("Профиль загружен. Перед запуском проверьте доступность указанных файлов/папок: " + dialog.FileName);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Не удалось загрузить профиль", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     private void CancelCurrentDownload()
