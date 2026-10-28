@@ -212,8 +212,20 @@ internal static class ImageServicingEngine
                 if (Directory.Exists(setupMedia)) setupMediaRoot = Path.GetFullPath(setupMedia);
                 else if (File.Exists(setupMedia) && Path.GetExtension(setupMedia).Equals(".iso", StringComparison.OrdinalIgnoreCase))
                 {
-                    setupMediaLetter = MountIso(Path.GetFullPath(setupMedia));
-                    setupMediaRoot = setupMediaLetter + @":\";
+                    var fullSetupMedia = Path.GetFullPath(setupMedia);
+                    if (!string.IsNullOrWhiteSpace(request.PackageSource) &&
+                        File.Exists(request.PackageSource.Trim()) &&
+                        PathComparer.Equals(fullSetupMedia, Path.GetFullPath(request.PackageSource.Trim())) &&
+                        packageRoot is not null)
+                    {
+                        setupMediaRoot = packageRoot;
+                        report(5, "Language Pack и Setup используют один смонтированный ISO; повторное подключение пропущено.");
+                    }
+                    else
+                    {
+                        setupMediaLetter = MountIso(fullSetupMedia);
+                        setupMediaRoot = setupMediaLetter + @":\";
+                    }
                 }
                 else throw new InvalidOperationException("Источник ресурсов Windows Setup должен быть существующей папкой или ISO-файлом.");
             }
@@ -225,7 +237,10 @@ internal static class ImageServicingEngine
                 var fodSource = request.FodSource.Trim();
                 var sameAsPackageSource = !string.IsNullOrWhiteSpace(request.PackageSource) &&
                     PathComparer.Equals(Path.GetFullPath(fodSource), Path.GetFullPath(request.PackageSource.Trim()));
-                if (!sameAsPackageSource)
+                var sameAsSetupSource = !string.IsNullOrWhiteSpace(request.RussianSetupMedia) &&
+                    PathComparer.Equals(Path.GetFullPath(fodSource), Path.GetFullPath(request.RussianSetupMedia.Trim())) &&
+                    setupMediaRoot is not null;
+                if (!sameAsPackageSource && !sameAsSetupSource)
                 {
                     if (Directory.Exists(fodSource)) packageRoots.Add(Path.GetFullPath(fodSource));
                     else if (File.Exists(fodSource) && Path.GetExtension(fodSource).Equals(".iso", StringComparison.OrdinalIgnoreCase))
