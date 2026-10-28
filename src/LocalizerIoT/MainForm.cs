@@ -35,6 +35,7 @@ public sealed class MainForm : Form
     private readonly Button _saveLog = new() { Text = "Сохранить журнал…", AutoSize = true };
     private readonly Button _copyLog = new() { Text = "Копировать", AutoSize = true };
     private TabControl? _workspaceTabs;
+    private TabPage? _logTabPage;
 
     private CancellationTokenSource? _operationCts;
     private readonly ProgressBar _progress = new() { Width = 240, Minimum = 0, Maximum = 100 };
@@ -224,6 +225,7 @@ public sealed class MainForm : Form
         var sourcesTab = new TabPage("2. Языковые источники") { BackColor = Color.White, UseVisualStyleBackColor = false, AutoScroll = true };
         var settingsTab = new TabPage("3. Параметры") { BackColor = Color.White, UseVisualStyleBackColor = false, AutoScroll = true };
         var logTab = new TabPage("Журнал и диагностика") { BackColor = Color.White, UseVisualStyleBackColor = false };
+        _logTabPage = logTab;
         _workspaceTabs.TabPages.AddRange(new[] { imageTab, sourcesTab, settingsTab, logTab });
         root.Controls.Add(_workspaceTabs, 0, 1);
 
@@ -1089,6 +1091,7 @@ public sealed class MainForm : Form
         _inspect.Enabled = _inspectDonor.Enabled = _autoDownload.Enabled = _browseCab.Enabled = _run.Enabled = !busy;
         _saveProfile.Enabled = _loadProfile.Enabled = _exportBundle.Enabled = !busy;
         _clearLog.Enabled = _saveLog.Enabled = _copyLog.Enabled = !busy;
+        if (busy && _workspaceTabs is not null && _logTabPage is not null) _workspaceTabs.SelectedTab = _logTabPage;
         if (_workspaceTabs is not null) _workspaceTabs.Enabled = !busy;
         _cancelDownload.Enabled = busy && _operationCts is not null;
         Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
