@@ -10,6 +10,7 @@ internal sealed record ImageIndexInfo(int Index, string Name, string Architectur
 internal sealed record LocalizationRequest(
     string SourceIso,
     string? PackageSource,
+    string? RussianSetupMedia,
     string[] ExplicitCabFiles,
     string OutputIso,
     bool AllIndexes,
@@ -68,12 +69,15 @@ internal static class ImageServicingEngine
             throw new InvalidOperationException("Выходной ISO не может совпадать с исходным файлом.");
         if (!IsAdministrator()) throw new InvalidOperationException("Для обслуживания образов запустите программу от имени администратора.");
         Directory.CreateDirectory(Path.GetDirectoryName(outputIso)!);
+        if (File.Exists(outputIso)) File.Delete(outputIso);
 
         var work = Path.Combine(Path.GetTempPath(), "LocalizerIoT-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(work);
         string? targetIsoLetter = null;
         string? packageIsoLetter = null;
         string? packageRoot = null;
+        string? setupMediaLetter = null;
+        string? setupMediaRoot = null;
         var mountDir = Path.Combine(work, "mount");
         var currentMount = false;
 
@@ -101,6 +105,17 @@ internal static class ImageServicingEngine
                 }
                 else throw new InvalidOperationException("Источник языковых пакетов должен быть существующей папкой или ISO-файлом.");
             }
+            if (!string.IsNullOrWhiteSpace(request.RussianSetupMedia))
+            {
+                var setupMedia = request.RussianSetupMedia.Trim();
+                if (Directory.Exists(setupMedia)) setupMediaRoot = Path.GetFullPath(setupMedia);
+                else if (File.Exists(setupMedia) && Path.GetExtension(setupMedia).Equals(".iso", StringComparison.OrdinalIgnoreCase))
+                {
+                    setupMediaLetter = MountIso(Path.GetFullPath(setupMedia));
+                    setupMediaRoot = setupMediaLetter + @":\\";
+                }
+                else throw new InvalidOperationException("Источник ресурсов Windows Setup должен быть существующей папкой или ISO-файлом.");
+            }
             packageRoots.AddRange(request.ExplicitCabFiles.Where(File.Exists).Select(Path.GetDirectoryName).Where(p => p is not null).Cast<string>());
             packageRoots = packageRoots.Distinct(PathComparer).ToList();
 
@@ -114,7 +129,7 @@ internal static class ImageServicingEngine
                 throw new InvalidOperationException("Не найден основной CAB-пакет русского языка для Windows (например, Microsoft-Windows-Client-Language-Pack_x64_ru-ru.cab). Укажите подходящий Language Pack ISO или папку с пакетами ru-RU. Неподходящие пакеты автоматически не скачиваются.");
             report(8, $"Обнаружена архитектура: {architecture}. Основных CAB/FOD-кандидатов: {packages.Count}; пакетов для Windows: {windowsPackages.Length}.");
 
-            CopyRussianSetupResources(packageRoots, stage, warnings, report);
+            CopyRussianSetupResources(packageRoots, setupMediaRoot, stage, warnings, report);
 
             var sources = Path.Combine(stage, "sources");
             var installWim = Path.Combine(sources, "install.wim");
@@ -169,7 +184,7 @@ internal static class ImageServicingEngine
                 try
                 {
                     ApplyCabPackages(dism, mountDir, windowsPackages, report, progress, 25, 40);
-                    TryAddLanguageCapabilities(dism, mountDir, packages, capabilitySources, warnings, report, progress);
+                    TryAddLanguageCapabilities(dism, mountDir, packages.ToArray(), capabilitySources, warnings, report, progress);
                     SetRussianDefaults(dism, mountDir, warnings, report, progress);
                     TryServiceWinRe(dism, mountDir, work, packageRoots, warnings, report, progress);
                     var langIni = Run(dism, "/Image:" + mountDir, "/Gen-LangINI", "/Distribution:" + stage);
@@ -249,6 +264,8 @@ internal static class ImageServicingEngine
             if (targetIsoLetter is not null) TryDismountIso(sourceIso);
             if (packageIsoLetter is not null && !string.IsNullOrWhiteSpace(request.PackageSource))
                 TryDismountIso(Path.GetFullPath(request.PackageSource));
+            if (setupMediaLetter is not null && !string.IsNullOrWhiteSpace(request.RussianSetupMedia))
+                TryDismountIso(Path.GetFullPath(request.RussianSetupMedia));
             try { Run(dism, "/Cleanup-Wim"); } catch { }
             try { Directory.Delete(work, true); } catch { }
         }
@@ -538,9 +555,12 @@ internal static class ImageServicingEngine
         report(86, "Добавлен autounattend.xml только с региональными параметрами ru-RU (страницы выбора диска/учётной записи не скрываются).");
     }
 
-    private static void CopyRussianSetupResources(List<string> packageRoots, string stage, List<string> warnings, Action<int, string> report)
+    private static void CopyRussianSetupResources(List<string> packageRoots, string? setupMediaRoot, string stage, List<string> warnings, Action<int, string> report)
     {
-        foreach (var root in packageRoots)
+        var candidateRoots = new List<string>();
+        if (!string.IsNullOrWhiteSpace(setupMediaRoot)) candidateRoots.Add(setupMediaRoot);
+        candidateRoots.AddRange(packageRoots);
+        foreach (var root in candidateRoots.Distinct(PathComparer))
         {
             var russianSources = Path.Combine(root, "sources", "ru-ru");
             if (!Directory.Exists(russianSources)) continue;
@@ -549,7 +569,7 @@ internal static class ImageServicingEngine
             report(9, "Скопированы локализованные ресурсы Windows Setup: sources\\ru-ru.");
             return;
         }
-        AddWarning(warnings, "Не найден каталог sources\\ru-ru с локализованными файлами Windows Setup. Даже при локализации boot.wim часть экранов Setup может остаться английской.");
+        AddWarning(warnings, "Не найден каталог sources\\ru-ru с локализованными файлами Windows Setup. Для полной локализации Setup укажите matching Russian Windows ISO/папку ресурсов.");
     }
 
     private static string[] DiscoverRussianPackages(IEnumerable<string> packageRoots, IEnumerable<string> explicitFiles)
@@ -596,7 +616,7 @@ internal static class ImageServicingEngine
 
     private static bool HasRequiredSetupLanguagePackages(string winpeRoot)
     {
-        var files = GetWinPeCabs(winpeRoot).Select(Path.GetFileName).ToArray();
+        var files = GetWinPeCabs(winpeRoot).Select(Path.GetFileName).Where(n => n is not null).Cast<string>().ToArray();
         return files.Any(n => n.Equals("lp.cab", StringComparison.OrdinalIgnoreCase)) &&
             files.Any(n => n.Contains("WinPE-Setup_ru-ru", StringComparison.OrdinalIgnoreCase)) &&
             files.Any(n => n.Contains("WinPE-Setup-Client_ru-ru", StringComparison.OrdinalIgnoreCase));
