@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.IO.Compression;
 
 namespace LocalizerIoT;
 
@@ -23,6 +24,7 @@ public sealed class MainForm : Form
     private readonly Button _cancelDownload = new() { Text = "Отменить загрузку", AutoSize = true, Enabled = false };
     private readonly Button _saveProfile = new() { Text = "Сохранить профиль…", AutoSize = true };
     private readonly Button _loadProfile = new() { Text = "Загрузить профиль…", AutoSize = true };
+    private readonly Button _exportBundle = new() { Text = "Экспорт офлайн-пакета…", AutoSize = true };
     private readonly CheckBox _useWindowsUpdateForCapabilities = new() { Text = "Разрешить Windows Update только для недостающих языковых FOD (не обновляет ОС)", AutoSize = true, Checked = false };
     private CancellationTokenSource? _operationCts;
     private readonly ProgressBar _progress = new() { Width = 240, Minimum = 0, Maximum = 100 };
@@ -86,6 +88,7 @@ public sealed class MainForm : Form
         _cancelDownload.Click += (_, _) => CancelCurrentDownload();
         _saveProfile.Click += (_, _) => SaveProfile();
         _loadProfile.Click += (_, _) => LoadProfile();
+        _exportBundle.Click += async (_, _) => await ExportOfflineBundleAsync();
 
         Log("Localizer-IoT: исходный ISO копируется во временную папку и не изменяется.");
         Log("Укажите отдельно Language Pack ISO и Languages and Optional Features ISO, если в поставке это разные носители.");
@@ -245,6 +248,7 @@ public sealed class MainForm : Form
         options.Controls.Add(_useWindowsUpdateForCapabilities);
         options.Controls.Add(_saveProfile);
         options.Controls.Add(_loadProfile);
+        options.Controls.Add(_exportBundle);
         options.Controls.Add(new Label { Text = "Выходной ISO:", AutoSize = true, Padding = new Padding(8, 5, 0, 0) });
         _output.Width = 250;
         _output.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Windows-IoT-LTSC-ru.iso");
@@ -578,8 +582,128 @@ public sealed class MainForm : Form
     {
         _busy = busy;
         _inspect.Enabled = _inspectDonor.Enabled = _autoDownload.Enabled = _browseCab.Enabled = _run.Enabled = !busy;
+        _saveProfile.Enabled = _loadProfile.Enabled = _exportBundle.Enabled = !busy;
         _cancelDownload.Enabled = busy && _operationCts is not null;
         Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
+    }
+
+    private async Task ExportOfflineBundleAsync()
+    {
+        using var dialog = new SaveFileDialog
+        {
+            Filter = "Офлайн-пакет языковых компонентов (*.zip)|*.zip",
+            DefaultExt = "zip",
+            AddExtension = true,
+            FileName = "Localizer-IoT-ru-RU-offline.zip",
+            Title = "Экспортировать найденные языковые компоненты и ресурсы Setup"
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+        var roots = new[] { _packageSource.Text.Trim(), _fodSource.Text.Trim(), _setupSource.Text.Trim(), _donorSource.Text.Trim() }
+            .Where(p => !string.IsNullOrWhiteSpace(p) && Directory.Exists(p))
+            .Select(Path.GetFullPath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (roots.Length == 0)
+        {
+            MessageBox.Show(this,
+                "Для экспорта укажите хотя бы одну папку с распакованными языковыми компонентами. ISO-файлы не распаковываются автоматически этим экспортом; кеш, созданный автоматической загрузкой, уже подходит.",
+                "Нет папок-источников", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var output = Path.GetFullPath(dialog.FileName);
+        SetBusy(true);
+        _progress.Value = 0;
+        var temp = output + ".building";
+        try
+        {
+            await Task.Run(() =>
+            {
+                var files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var setupResources = 0;
+                var scanned = 0;
+                for (var i = 0; i < roots.Length; i++)
+                {
+                    var root = roots[i];
+                    IEnumerable<string> sourceFiles;
+                    try { sourceFiles = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories).ToArray(); }
+                    catch (Exception ex) { Log("Не удалось просканировать источник для офлайн-пакета " + root + ": " + ex.Message); continue; }
+
+                    foreach (var file in sourceFiles)
+                    {
+                        scanned++;
+                        if (scanned % 250 == 0) Ui(() => _progress.Value = Math.Min(35, _progress.Value + 1));
+                        var normalized = file.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+                        var relative = Path.GetRelativePath(root, file);
+                        var lower = normalized.ToLowerInvariant();
+                        var name = Path.GetFileName(file).ToLowerInvariant();
+                        var isUpdate = System.Text.RegularExpressions.Regex.IsMatch(name, @"kb\d{6,}", System.Text.RegularExpressions.RegexOptions.IgnoreCase) ||
+                            name.Contains("rollupfix") || name.Contains("cumulative") || name.Contains("servicingstack") ||
+                            System.Text.RegularExpressions.Regex.IsMatch(name, @"(^|[-_.])lcu([-_.]|$)", System.Text.RegularExpressions.RegexOptions.IgnoreCase) ||
+                            System.Text.RegularExpressions.Regex.IsMatch(name, @"(^|[-_.])ssu([-_.]|$)", System.Text.RegularExpressions.RegexOptions.IgnoreCase) ||
+                            Path.GetExtension(file).Equals(".msu", StringComparison.OrdinalIgnoreCase);
+                        if (isUpdate) continue;
+
+                        var setupMarker = Path.DirectorySeparatorChar + "sources" + Path.DirectorySeparatorChar + "ru-ru" + Path.DirectorySeparatorChar;
+                        var winPeMarker = Path.DirectorySeparatorChar + "winpe_ocs" + Path.DirectorySeparatorChar + "ru-ru" + Path.DirectorySeparatorChar;
+                        var isSetupResource = lower.Contains(setupMarker, StringComparison.OrdinalIgnoreCase);
+                        var isWinPeResource = lower.Contains(winPeMarker, StringComparison.OrdinalIgnoreCase);
+                        var isRussianCab = Path.GetExtension(file).Equals(".cab", StringComparison.OrdinalIgnoreCase) &&
+                            (lower.Contains("ru-ru") || lower.Contains("ru_ru") || lower.Contains("russian") || isWinPeResource) &&
+                            (name.Contains("language") || name.Contains("languagepack") || name.Contains("language-pack") ||
+                             name.Contains("languagefeature") || name.Contains("language-feature") || name.Contains("winpe-") ||
+                             name.Equals("lp.cab") || isWinPeResource);
+                        if (!isSetupResource && !isRussianCab) continue;
+                        var prefix = "source-" + (i + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                        var entry = prefix + "/" + relative.Replace(Path.DirectorySeparatorChar, '/');
+                        if (files.TryAdd(entry, file) && isSetupResource) setupResources++;
+                    }
+                }
+
+                if (files.Count == 0)
+                    throw new InvalidOperationException("В выбранных папках не найдены отдельные ru-RU CAB или ресурсы sources\\ru-ru. Проверьте источники.");
+                try { if (File.Exists(temp)) File.Delete(temp); } catch { }
+                var report = new StringBuilder();
+                report.AppendLine("Localizer-IoT offline language bundle");
+                report.AppendLine("Created UTC: " + DateTimeOffset.UtcNow.ToString("O"));
+                report.AppendLine("OS update payloads included: no");
+                report.AppendLine("Entries: " + files.Count);
+                using (var fs = new FileStream(temp, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
+                using (var zip = new ZipArchive(fs, ZipArchiveMode.Create, leaveOpen: false))
+                {
+                    var index = 0;
+                    foreach (var item in files.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
+                    {
+                        var info = new FileInfo(item.Value);
+                        using var input = new FileStream(item.Value, FileMode.Open, FileAccess.Read, FileShare.Read);
+                        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(input));
+                        input.Position = 0;
+                        var entry = zip.CreateEntry(item.Key, CompressionLevel.NoCompression);
+                        using (var dest = entry.Open()) input.CopyTo(dest);
+                        report.AppendLine($"{info.Length}\t{hash}\t{item.Key}");
+                        index++;
+                        if (index % 20 == 0) Ui(() => _progress.Value = 35 + (int)(60.0 * index / files.Count));
+                    }
+                    var manifest = zip.CreateEntry("bundle-manifest.txt", CompressionLevel.Optimal);
+                    using var writer = new StreamWriter(manifest.Open(), new UTF8Encoding(false));
+                    writer.Write(report.ToString());
+                }
+            });
+            if (File.Exists(output)) File.Delete(output);
+            File.Move(temp, output);
+            _progress.Value = 100;
+            Log("Офлайн-пакет создан: " + output);
+            MessageBox.Show(this, "Офлайн-пакет создан. Внутри — найденные русские Language Pack/FOD/WinPE CAB и ресурсы sources\\ru-ru, если они были в папках-источниках. LCU/SSU/KB/MSU не включаются. Проверьте bundle-manifest.txt.",
+                "Экспорт завершён", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            try { if (File.Exists(temp)) File.Delete(temp); } catch { }
+            Log("Не удалось создать офлайн-пакет: " + ex.Message);
+            MessageBox.Show(this, ex.Message, "Экспорт офлайн-пакета не завершён", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        finally { SetBusy(false); }
     }
 
     private sealed record LocalizationProfile(
