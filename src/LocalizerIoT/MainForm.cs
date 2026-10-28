@@ -321,6 +321,34 @@ public sealed class MainForm : Form
         if (File.Exists(output) && MessageBox.Show(this, "Выходной ISO уже существует. Перезаписать?", "Подтверждение",
             MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
 
+        if (ImageServicingEngine.FindOscdimgPath() is null)
+        {
+            var choice = MessageBox.Show(this,
+                "На компьютере не найден oscdimg.exe. Скачать официальный установщик Microsoft ADK и автоматически установить только Deployment Tools?\n\nУстановщик проверяется по цифровой подписи Microsoft. Потребуется интернет и свободное место. Компоненты WinPE дополнительно могут понадобиться для полной локализации установщика Windows.",
+                "Нужен компонент для создания ISO", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+            if (choice != DialogResult.Yes) return;
+
+            SetBusy(true);
+            try
+            {
+                _progress.Value = 0;
+                await ImageServicingEngine.EnsureDeploymentToolsAsync(Log);
+                _progress.Value = 5;
+            }
+            catch (Exception ex)
+            {
+                Log("Не удалось автоматически установить Deployment Tools: " + ex.Message);
+                MessageBox.Show(this, ex.Message, "Установка ADK не завершена", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            finally { SetBusy(false); }
+            if (ImageServicingEngine.FindOscdimgPath() is null)
+            {
+                MessageBox.Show(this, "oscdimg.exe всё ещё не найден. Обработка не начата.");
+                return;
+            }
+        }
+
         var cabFiles = _packages.Text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
             .Select(s => s.Trim()).Where(File.Exists).ToArray();
         var request = new LocalizationRequest(
