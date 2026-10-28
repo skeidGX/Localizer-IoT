@@ -7,6 +7,7 @@ public sealed class MainForm : Form
 {
     private readonly TextBox _iso = new() { Dock = DockStyle.Fill, AllowDrop = true };
     private readonly TextBox _packageSource = new() { Dock = DockStyle.Fill, AllowDrop = true };
+    private readonly TextBox _fodSource = new() { Dock = DockStyle.Fill, AllowDrop = true };
     private readonly TextBox _setupSource = new() { Dock = DockStyle.Fill, AllowDrop = true };
     private readonly TextBox _packages = new() { Dock = DockStyle.Fill, Multiline = true, ScrollBars = ScrollBars.Vertical };
     private readonly TextBox _output = new() { Dock = DockStyle.Fill };
@@ -36,6 +37,18 @@ public sealed class MainForm : Form
         _iso.DragDrop += (_, e) => HandleDrop(e, false);
         _packageSource.DragEnter += OnDragEnter;
         _packageSource.DragDrop += (_, e) => HandleDrop(e, true);
+        _fodSource.DragEnter += OnDragEnter;
+        _fodSource.DragDrop += (_, e) =>
+        {
+            if (e.Data?.GetData(DataFormats.FileDrop) is string[] files)
+            {
+                var candidate = files.FirstOrDefault(p => Directory.Exists(p) ||
+                    (File.Exists(p) && Path.GetExtension(p).Equals(".iso", StringComparison.OrdinalIgnoreCase)));
+                if (candidate is not null) _fodSource.Text = candidate;
+                var cabs = files.Where(p => File.Exists(p) && Path.GetExtension(p).Equals(".cab", StringComparison.OrdinalIgnoreCase)).ToArray();
+                if (cabs.Length > 0) AddCabFiles(cabs);
+            }
+        };
         _setupSource.DragEnter += OnDragEnter;
         _setupSource.DragDrop += (_, e) =>
         {
@@ -51,7 +64,8 @@ public sealed class MainForm : Form
         _run.Click += async (_, _) => await RunLocalizationAsync();
 
         Log("Localizer-IoT: исходный ISO копируется во временную папку и не изменяется.");
-        Log("Рекомендуется иметь LP/FOD ISO той же версии, сборки и архитектуры, что и целевая Windows.");
+        Log("Укажите отдельно Language Pack ISO и Languages and Optional Features ISO, если в поставке это разные носители.");
+        Log("Все языковые и FOD источники должны соответствовать версии, базовой сборке и архитектуре целевого образа.");
         Log("Автоматическая загрузка лицензируемых Language Pack/FoD ISO не включена: программа ищет совместимые CAB в предоставленном источнике и ADK.");
     }
 
@@ -92,27 +106,46 @@ public sealed class MainForm : Form
         isoPanel.Controls.Add(pickIso, 2, 0);
         root.Controls.Add(isoPanel);
 
-        var mediaPanel = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 4, AutoSize = true };
+        var mediaPanel = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 4, RowCount = 2, AutoSize = true };
+        mediaPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        mediaPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         mediaPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         mediaPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         mediaPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         mediaPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        mediaPanel.Controls.Add(new Label { Text = "Источник LP/FOD:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
+        mediaPanel.Controls.Add(new Label { Text = "Language Pack ISO:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
         mediaPanel.Controls.Add(_packageSource, 1, 0);
         var pickMediaIso = new Button { Text = "ISO…", AutoSize = true };
         pickMediaIso.Click += (_, _) =>
         {
-            using var d = new OpenFileDialog { Filter = "ISO-образы (*.iso)|*.iso", Title = "Выберите Language Pack / Languages and Optional Features ISO" };
+            using var d = new OpenFileDialog { Filter = "ISO-образы (*.iso)|*.iso", Title = "Выберите ISO языковых пакетов Windows" };
             if (d.ShowDialog(this) == DialogResult.OK) _packageSource.Text = d.FileName;
         };
         var pickMediaFolder = new Button { Text = "Папка…", AutoSize = true };
         pickMediaFolder.Click += (_, _) =>
         {
-            using var d = new FolderBrowserDialog { Description = "Выберите извлечённый Language Pack / Features on Demand repository" };
+            using var d = new FolderBrowserDialog { Description = "Выберите папку с CAB языковых пакетов ru-RU" };
             if (d.ShowDialog(this) == DialogResult.OK) _packageSource.Text = d.SelectedPath;
         };
         mediaPanel.Controls.Add(pickMediaIso, 2, 0);
         mediaPanel.Controls.Add(pickMediaFolder, 3, 0);
+
+        mediaPanel.Controls.Add(new Label { Text = "Features on Demand ISO:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 1);
+        mediaPanel.Controls.Add(_fodSource, 1, 1);
+        var pickFodIso = new Button { Text = "ISO…", AutoSize = true };
+        pickFodIso.Click += (_, _) =>
+        {
+            using var d = new OpenFileDialog { Filter = "ISO-образы (*.iso)|*.iso", Title = "Выберите Languages and Optional Features / Features on Demand ISO" };
+            if (d.ShowDialog(this) == DialogResult.OK) _fodSource.Text = d.FileName;
+        };
+        var pickFodFolder = new Button { Text = "Папка…", AutoSize = true };
+        pickFodFolder.Click += (_, _) =>
+        {
+            using var d = new FolderBrowserDialog { Description = "Выберите папку LanguagesAndOptionalFeatures с FOD-файлами" };
+            if (d.ShowDialog(this) == DialogResult.OK) _fodSource.Text = d.SelectedPath;
+        };
+        mediaPanel.Controls.Add(pickFodIso, 2, 1);
+        mediaPanel.Controls.Add(pickFodFolder, 3, 1);
         root.Controls.Add(mediaPanel);
 
         var setupPanel = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 4, AutoSize = true };
@@ -272,7 +305,12 @@ public sealed class MainForm : Form
         }
         if (!IsValidMediaPath(_packageSource.Text))
         {
-            MessageBox.Show(this, "Источник LP/FOD должен быть существующей папкой или ISO-файлом.");
+            MessageBox.Show(this, "Источник Language Pack должен быть существующей папкой или ISO-файлом.");
+            return;
+        }
+        if (!IsValidMediaPath(_fodSource.Text))
+        {
+            MessageBox.Show(this, "Источник Features on Demand должен быть существующей папкой или ISO-файлом.");
             return;
         }
         if (!IsValidMediaPath(_setupSource.Text))
@@ -288,6 +326,7 @@ public sealed class MainForm : Form
         var request = new LocalizationRequest(
             Path.GetFullPath(_iso.Text.Trim()),
             string.IsNullOrWhiteSpace(_packageSource.Text) ? null : Path.GetFullPath(_packageSource.Text.Trim()),
+            string.IsNullOrWhiteSpace(_fodSource.Text) ? null : Path.GetFullPath(_fodSource.Text.Trim()),
             string.IsNullOrWhiteSpace(_setupSource.Text) ? null : Path.GetFullPath(_setupSource.Text.Trim()),
             cabFiles,
             Path.GetFullPath(output),
