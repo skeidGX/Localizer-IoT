@@ -112,7 +112,7 @@ internal static class ImageServicingEngine
                 else if (File.Exists(setupMedia) && Path.GetExtension(setupMedia).Equals(".iso", StringComparison.OrdinalIgnoreCase))
                 {
                     setupMediaLetter = MountIso(Path.GetFullPath(setupMedia));
-                    setupMediaRoot = setupMediaLetter + @":\\";
+                    setupMediaRoot = setupMediaLetter + @":\";
                 }
                 else throw new InvalidOperationException("Источник ресурсов Windows Setup должен быть существующей папкой или ISO-файлом.");
             }
