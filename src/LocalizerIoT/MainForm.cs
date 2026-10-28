@@ -19,6 +19,9 @@ public sealed class MainForm : Form
     private readonly Button _autoDownload = new() { Text = "Автоматически скачать RU", AutoSize = true };
     private readonly Button _browseCab = new() { Text = "Добавить CAB…", AutoSize = true };
     private readonly Button _run = new() { Text = "Создать русифицированный ISO", AutoSize = true };
+    private readonly Button _cancelDownload = new() { Text = "Отменить загрузку", AutoSize = true, Enabled = false };
+    private readonly CheckBox _useWindowsUpdateForCapabilities = new() { Text = "Разрешить Windows Update только для недостающих языковых FOD (не обновляет ОС)", AutoSize = true, Checked = false };
+    private CancellationTokenSource? _operationCts;
     private readonly ProgressBar _progress = new() { Width = 240, Minimum = 0, Maximum = 100 };
     private readonly TextBox _log = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Font = new Font("Consolas", 9) };
     private readonly Label _status = new() { AutoSize = true, Text = "Выберите исходный ISO Windows." };
@@ -26,7 +29,7 @@ public sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "Localizer-IoT Alpha 0.1.0.1 — русификация Windows IoT Enterprise LTSC";
+        Text = "Localizer-IoT Alpha 0.9.0.0 — русификация Windows IoT Enterprise LTSC";
         Width = 1080;
         Height = 800;
         MinimumSize = new Size(850, 650);
@@ -77,11 +80,13 @@ public sealed class MainForm : Form
         _autoDownload.Click += async (_, _) => await AutoDownloadRussianPackagesAsync();
         _browseCab.Click += (_, _) => SelectCabFiles();
         _run.Click += async (_, _) => await RunLocalizationAsync();
+        _cancelDownload.Click += (_, _) => CancelCurrentDownload();
 
         Log("Localizer-IoT: исходный ISO копируется во временную папку и не изменяется.");
         Log("Укажите отдельно Language Pack ISO и Languages and Optional Features ISO, если в поставке это разные носители.");
         Log("Все языковые и FOD источники должны соответствовать версии, базовой сборке и архитектуре целевого образа.");
-        Log("Автоподбор RU использует UUP Dump JSON API и проверяет целостность файлов. Автоматическая доступность FOD и Setup/WinPE зависит от выпуска Windows.");
+        Log("Автоподбор RU использует UUP Dump JSON API, проверяет размер и SHA-1, поддерживает повторные попытки и продолжение загрузок.");
+        Log("По умолчанию Windows Update не используется. Необязательный флажок разрешает его только для языковых FOD-возможностей; пакеты обновлений ОС не интегрируются.");
         Log("Русский ISO-донор можно указать отдельно: программа проверит его CAB-пакеты ru-RU и resources sources\\ru-ru без изменения исходных файлов.");
     }
 
@@ -231,6 +236,8 @@ public sealed class MainForm : Form
         options.Controls.Add(_index);
         options.Controls.Add(_inspect);
         options.Controls.Add(_autoDownload);
+        options.Controls.Add(_cancelDownload);
+        options.Controls.Add(_useWindowsUpdateForCapabilities);
         options.Controls.Add(new Label { Text = "Выходной ISO:", AutoSize = true, Padding = new Padding(8, 5, 0, 0) });
         _output.Width = 250;
         _output.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Windows-IoT-LTSC-ru.iso");
@@ -363,8 +370,7 @@ public sealed class MainForm : Form
         _progress.Value = 0;
         try
         {
-            var result = await UupLanguagePackDownloader.DownloadRussianPackagesAsync(
-                _iso.Text.Trim(), Log, p => Ui(() => _progress.Value = Math.Clamp(p, 0, 100)));
+            var result = await DownloadRussianPackagesWithCancellationAsync();
             _packageSource.Text = result.Directory;
             _fodSource.Text = result.Directory;
             Log($"Автоподбор завершён: база {result.LanguagePackBaseBuild}; подготовлено CAB: {result.PackagesReady}; языковых FOD CAB: {result.FeaturePackagesReady}.");
@@ -422,15 +428,14 @@ public sealed class MainForm : Form
 
         var cabFiles = _packages.Text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
             .Select(s => s.Trim()).Where(File.Exists).ToArray();
-        if (string.IsNullOrWhiteSpace(_packageSource.Text) && string.IsNullOrWhiteSpace(_donorSource.Text) && cabFiles.Length == 0)
+        if (string.IsNullOrWhiteSpace(_packageSource.Text) && cabFiles.Length == 0 && !DonorFolderHasCoreLanguagePack())
         {
             SetBusy(true);
             _progress.Value = 0;
             try
             {
                 Log("Не задан источник Language Pack или русский ISO-донор — запускаю автоматический поиск и скачивание ru-RU.");
-                var result = await UupLanguagePackDownloader.DownloadRussianPackagesAsync(
-                    _iso.Text.Trim(), Log, p => Ui(() => _progress.Value = Math.Clamp(p, 0, 100)));
+                var result = await DownloadRussianPackagesWithCancellationAsync();
                 _packageSource.Text = result.Directory;
                 if (string.IsNullOrWhiteSpace(_fodSource.Text)) _fodSource.Text = result.Directory;
                 cabFiles = _packages.Text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
@@ -511,7 +516,8 @@ public sealed class MainForm : Form
             cabFiles,
             Path.GetFullPath(output),
             _allIndexes.Checked,
-            (int)_index.Value);
+            (int)_index.Value,
+            _useWindowsUpdateForCapabilities.Checked);
 
         SetBusy(true);
         _progress.Value = 0;
@@ -556,7 +562,57 @@ public sealed class MainForm : Form
     {
         _busy = busy;
         _inspect.Enabled = _inspectDonor.Enabled = _autoDownload.Enabled = _browseCab.Enabled = _run.Enabled = !busy;
+        _cancelDownload.Enabled = busy && _operationCts is not null;
         Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
+    }
+
+    private void CancelCurrentDownload()
+    {
+        if (_operationCts is null || _operationCts.IsCancellationRequested) return;
+        _operationCts.Cancel();
+        _cancelDownload.Enabled = false;
+        Log("Запрошена отмена загрузки. Уже подтверждённые файлы кэша сохранятся; частично скачанный файл будет доступен для продолжения.");
+    }
+
+    private async Task<AutoLanguagePackageSource> DownloadRussianPackagesWithCancellationAsync()
+    {
+        using var cts = new CancellationTokenSource();
+        _operationCts = cts;
+        _cancelDownload.Enabled = true;
+        try
+        {
+            return await UupLanguagePackDownloader.DownloadRussianPackagesAsync(
+                _iso.Text.Trim(), Log, p => Ui(() => _progress.Value = Math.Clamp(p, 0, 100)), cts.Token);
+        }
+        finally
+        {
+            _operationCts = null;
+            _cancelDownload.Enabled = false;
+        }
+    }
+
+    private bool DonorFolderHasCoreLanguagePack()
+    {
+        var path = _donorSource.Text.Trim();
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) return false;
+        try
+        {
+            return Directory.EnumerateFiles(path, "*.cab", SearchOption.AllDirectories)
+                .Take(20000).Any(p =>
+                {
+                    var n = Path.GetFileName(p);
+                    return n.Contains("Client-LanguagePack", StringComparison.OrdinalIgnoreCase) ||
+                           n.Contains("Client_LanguagePack", StringComparison.OrdinalIgnoreCase) ||
+                           n.Contains("ClientLanguagePack", StringComparison.OrdinalIgnoreCase) ||
+                           n.Contains("Language-Pack", StringComparison.OrdinalIgnoreCase) ||
+                           n.Contains("LanguagePack", StringComparison.OrdinalIgnoreCase);
+                });
+        }
+        catch (Exception ex)
+        {
+            Log("Не удалось проверить CAB в папке донора; будет выполнен автоматический поиск Language Pack: " + ex.Message);
+            return false;
+        }
     }
 
     private void Log(string message)
