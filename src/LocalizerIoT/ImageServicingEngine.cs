@@ -567,6 +567,8 @@ internal static class ImageServicingEngine
             if (packageMajorBuild == 19041 && targetMajorBuild is >= 19041 and <= 19045) return true;
             // Windows 11 23H2 is an enablement release based on the 22621 servicing baseline.
             if (packageMajorBuild == 22621 && targetMajorBuild is 22621 or 22631) return true;
+            // Windows 11 24H2, 25H2 and 26H2 share the 26100 servicing branch.
+            if (packageMajorBuild == 26100 && targetMajorBuild is 26100 or 26200 or 26300) return true;
         }
         return false;
     }
@@ -1483,8 +1485,8 @@ internal static class ImageServicingEngine
             return new SetupKitRelease("Windows 10 version 2004–22H2 / LTSC 2021", "https://go.microsoft.com/fwlink/?linkid=2120254", "https://go.microsoft.com/fwlink/?linkid=2120253");
         if (build is 22621 or 22631)
             return new SetupKitRelease("Windows 11 versions 22H2/23H2", "https://go.microsoft.com/fwlink/?linkid=2196127", "https://go.microsoft.com/fwlink/?linkid=2196224");
-        if (build is >= 26100 and <= 26299)
-            return new SetupKitRelease("Windows 11 version 24H2 or newer compatible servicing baseline", "https://go.microsoft.com/fwlink/?linkid=2289980", "https://go.microsoft.com/fwlink/?linkid=2289981");
+        if (build is 26100 or 26200 or 26300)
+            return new SetupKitRelease("Windows 11 versions 24H2/25H2/26H2 (ADK 10.1.26100.9457 servicing baseline)", "https://go.microsoft.com/fwlink/?linkid=2289980", "https://go.microsoft.com/fwlink/?linkid=2289981");
         return null;
     }
 
