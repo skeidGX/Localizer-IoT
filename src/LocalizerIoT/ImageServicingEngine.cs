@@ -938,6 +938,51 @@ internal static class ImageServicingEngine
         return candidates.FirstOrDefault(File.Exists);
     }
 
+    public static string? FindOscdimgPath() => FindOscdimg();
+
+    public static async Task EnsureDeploymentToolsAsync(Action<string> log)
+    {
+        if (FindOscdimg() is not null)
+        {
+            log("oscdimg.exe уже доступен.");
+            return;
+        }
+
+        var installerPath = Path.Combine(Path.GetTempPath(), "LocalizerIoT-adksetup-" + Guid.NewGuid().ToString("N") + ".exe");
+        try
+        {
+            log("Загружаю официальный установщик Windows ADK с сервера Microsoft…");
+            using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(20) };
+            using var response = await client.GetAsync("https://go.microsoft.com/fwlink/?linkid=2289980", HttpCompletionOption.ResponseHeadersRead);
+            response.EnsureSuccessStatusCode();
+            await using (var remote = await response.Content.ReadAsStreamAsync())
+            await using (var local = new FileStream(installerPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 128, useAsync: true))
+                await remote.CopyToAsync(local);
+
+            log("Проверяю цифровую подпись установщика Microsoft…");
+            var escaped = installerPath.Replace("'", "''");
+            var signatureCommand = "$sig = Get-AuthenticodeSignature -LiteralPath '" + escaped +
+                "'; if ($sig.Status -ne 'Valid' -or $null -eq $sig.SignerCertificate -or $sig.SignerCertificate.Subject -notmatch 'Microsoft Corporation') { Write-Error 'The Microsoft Authenticode signature is not valid.'; exit 51 }";
+            var signature = Run("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", signatureCommand);
+            EnsureSuccess(signature, "Не удалось подтвердить цифровую подпись установщика ADK. Установка отменена.");
+
+            var installRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Windows Kits", "10");
+            log("Устанавливаю только Windows ADK Deployment Tools. Это не обновляет целевую Windows; установщик может скачать компоненты ADK.");
+            var install = Run(installerPath, "/quiet", "/installpath", installRoot, "/features", "OptionId.DeploymentTools");
+            if (install.ExitCode != 0 && install.ExitCode != 3010)
+                throw new InvalidOperationException("Установка Windows ADK завершилась с кодом " + install.ExitCode + ". " + ShortOutput(install.Output));
+
+            var executable = FindOscdimg();
+            if (executable is null)
+                throw new InvalidOperationException("Установщик завершился, но oscdimg.exe не найден. Проверьте журнал ADK Setup и путь установки.");
+            log("Deployment Tools установлены. oscdimg.exe: " + executable);
+        }
+        finally
+        {
+            try { if (File.Exists(installerPath)) File.Delete(installerPath); } catch { }
+        }
+    }
+
     private static string? FindOscdimg()
     {
         var roots = new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles) };
