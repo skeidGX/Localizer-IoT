@@ -30,7 +30,7 @@ internal static class UupLanguagePackDownloader
     private static readonly HttpClient Client = CreateClient();
 
     private sealed record UupBuild(string Id, string Build, string Architecture, string Title, long Created);
-    private sealed record UupFile(string Name, string Sha1, long Size, string Url);
+    private sealed record UupFile(string Name, string Sha1, long Size, string Url, long ExpiresAt);
 
     private static HttpClient CreateClient()
     {
@@ -96,44 +96,51 @@ internal static class UupLanguagePackDownloader
 
                 var ready = 0;
                 var fodReady = 0;
-                var cacheOk = true;
-                var esdFiles = new List<string>();
-                for (var i = 0; i < files.Count; i++)
+                var cacheOk = 1;
+                var esdFiles = new System.Collections.Concurrent.ConcurrentBag<string>();
+                var completedDownloads = 0;
+                var downloadErrors = new System.Collections.Concurrent.ConcurrentBag<string>();
+                log($"Загружаю файлы параллельно (до 3 потоков); подтверждённые файлы кеша будут переиспользованы.");
+                await Parallel.ForEachAsync(files, new ParallelOptions
                 {
-                    var file = files[i];
-                    cancellationToken.ThrowIfCancellationRequested();
+                    MaxDegreeOfParallelism = 3,
+                    CancellationToken = cancellationToken
+                }, async (file, ct) =>
+                {
                     var safeName = Path.GetFileName(file.Name);
-                    if (string.IsNullOrWhiteSpace(safeName))
-                        continue;
+                    if (string.IsNullOrWhiteSpace(safeName)) return;
                     var localPath = Path.Combine(cacheRoot, safeName);
-                    log($"Скачивание ({i + 1}/{files.Count}): {safeName}");
-                    progress?.Invoke(Math.Clamp(5 + (int)(35.0 * i / Math.Max(1, files.Count)), 5, 40));
                     try
                     {
-                        await DownloadAndVerifyFileAsync(file, localPath, cancellationToken);
+                        await DownloadAndVerifyFileAsync(file, localPath, build.Id, log, ct);
                         if (Path.GetExtension(localPath).Equals(".esd", StringComparison.OrdinalIgnoreCase))
                             esdFiles.Add(localPath);
                         else if (Path.GetExtension(localPath).Equals(".cab", StringComparison.OrdinalIgnoreCase))
                         {
-                            ready++;
-                            if (IsFeaturePackageFile(localPath)) fodReady++;
+                            Interlocked.Increment(ref ready);
+                            if (IsFeaturePackageFile(localPath)) Interlocked.Increment(ref fodReady);
                         }
                     }
+                    catch (OperationCanceledException) { throw; }
                     catch (Exception ex)
                     {
-                        cacheOk = false;
-                        errors.Add($"{safeName}: {ex.Message}");
+                        Interlocked.Exchange(ref cacheOk, 0);
+                        downloadErrors.Add($"{safeName}: {ex.Message}");
                         log($"  Не удалось получить {safeName}: {ex.Message}");
                     }
-                }
+                    var completed = Interlocked.Increment(ref completedDownloads);
+                    progress?.Invoke(Math.Clamp(5 + (int)(35.0 * completed / Math.Max(1, files.Count)), 5, 40));
+                });
+                foreach (var error in downloadErrors) errors.Add(error);
 
                 if (esdFiles.Count > 0)
                 {
                     var converter = await EnsureConverterToolsAsync(log, cancellationToken);
-                    for (var i = 0; i < esdFiles.Count; i++)
+                    var orderedEsdFiles = esdFiles.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToArray();
+                    for (var i = 0; i < orderedEsdFiles.Length; i++)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
-                        var esd = esdFiles[i];
+                        var esd = orderedEsdFiles[i];
                         var cab = Path.ChangeExtension(esd, ".cab");
                         if (File.Exists(cab) && new FileInfo(cab).Length > 0)
                         {
@@ -142,7 +149,7 @@ internal static class UupLanguagePackDownloader
                             continue;
                         }
                         log($"Преобразую языковой ESD в CAB ({i + 1}/{esdFiles.Count}): {Path.GetFileName(esd)}");
-                        progress?.Invoke(Math.Clamp(42 + (int)(20.0 * i / Math.Max(1, esdFiles.Count)), 42, 62));
+                        progress?.Invoke(Math.Clamp(42 + (int)(20.0 * i / Math.Max(1, orderedEsdFiles.Length)), 42, 62));
                         await ConvertEsdToCabAsync(esd, cab, cacheRoot, converter, log, cancellationToken);
                         ready++;
                         if (IsFeaturePackageFile(cab)) fodReady++;
@@ -295,7 +302,7 @@ internal static class UupLanguagePackDownloader
                 !extension.Equals(".cab", StringComparison.OrdinalIgnoreCase))
                 continue;
             result.Add(new UupFile(name, GetString(property.Value, "sha1"),
-                GetLong(property.Value, "size"), downloadUrl));
+                GetLong(property.Value, "size"), downloadUrl, GetLong(property.Value, "expire")));
         }
 
         return result.OrderBy(f => IsCoreLanguagePackFile(f.Name) ? 0 :
@@ -351,32 +358,118 @@ internal static class UupLanguagePackDownloader
     }
 
     private static async Task DownloadAndVerifyFileAsync(
-        UupFile file, string destination, CancellationToken cancellationToken)
+        UupFile file, string destination, string buildId, Action<string> log, CancellationToken cancellationToken)
     {
         if (File.Exists(destination) && await VerifySha1Async(destination, file.Sha1, file.Size, cancellationToken))
+        {
+            log("  Кеш подтверждён: " + Path.GetFileName(destination));
             return;
-
-        if (File.Exists(destination)) File.Delete(destination);
-        var temp = destination + ".download-" + Guid.NewGuid().ToString("N");
-        try
-        {
-            using var response = await Client.GetAsync(file.Url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            response.EnsureSuccessStatusCode();
-            await using (var remote = await response.Content.ReadAsStreamAsync(cancellationToken))
-            await using (var local = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None,
-                             1024 * 256, FileOptions.Asynchronous | FileOptions.SequentialScan))
-                await remote.CopyToAsync(local, cancellationToken);
-
-            if (file.Size > 0 && new FileInfo(temp).Length != file.Size)
-                throw new InvalidDataException($"размер не совпадает с манифестом ({new FileInfo(temp).Length} / {file.Size} байт)");
-            if (!await VerifySha1Async(temp, file.Sha1, file.Size, cancellationToken))
-                throw new InvalidDataException("SHA-1 не совпадает с манифестом UUP Dump.");
-            File.Move(temp, destination, true);
         }
-        finally
+
+        var partial = destination + ".partial";
+        var current = file;
+        if (current.ExpiresAt > 0 && DateTimeOffset.FromUnixTimeSeconds(current.ExpiresAt) < DateTimeOffset.UtcNow.AddMinutes(2))
+            current = await RefreshFileUrlAsync(buildId, file.Name, cancellationToken);
+
+        for (var attempt = 1; attempt <= 5; attempt++)
         {
-            try { if (File.Exists(temp)) File.Delete(temp); } catch { }
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var offset = File.Exists(partial) ? new FileInfo(partial).Length : 0L;
+                if (file.Size > 0 && offset >= file.Size)
+                {
+                    if (offset == file.Size && await VerifySha1Async(partial, file.Sha1, file.Size, cancellationToken))
+                    {
+                        File.Move(partial, destination, true);
+                        return;
+                    }
+                    File.Delete(partial);
+                    offset = 0;
+                }
+
+                using var request = new HttpRequestMessage(HttpMethod.Get, current.Url);
+                if (offset > 0)
+                    request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(offset, null);
+                using var response = await Client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+
+                if ((response.StatusCode == HttpStatusCode.Forbidden || response.StatusCode == HttpStatusCode.Unauthorized) && attempt < 5)
+                {
+                    current = await RefreshFileUrlAsync(buildId, file.Name, cancellationToken);
+                    await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), cancellationToken);
+                    continue;
+                }
+
+                if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable && offset > 0)
+                {
+                    try { File.Delete(partial); } catch { }
+                    continue;
+                }
+
+                if ((int)response.StatusCode == 429 || (int)response.StatusCode >= 500)
+                {
+                    if (attempt == 5) response.EnsureSuccessStatusCode();
+                    var retryDelay = response.Headers.RetryAfter?.Delta ??
+                        (response.Headers.RetryAfter?.Date is DateTimeOffset retryAt ? retryAt - DateTimeOffset.UtcNow : TimeSpan.FromSeconds(Math.Pow(2, attempt - 1)));
+                    if (retryDelay < TimeSpan.Zero) retryDelay = TimeSpan.Zero;
+                    if (retryDelay > TimeSpan.FromSeconds(30)) retryDelay = TimeSpan.FromSeconds(30);
+                    log($"  Временный HTTP {((int)response.StatusCode)} для {Path.GetFileName(file.Name)}; повтор {attempt + 1}/5 через {retryDelay.TotalSeconds:0.#} c.");
+                    await Task.Delay(retryDelay, cancellationToken);
+                    continue;
+                }
+
+                response.EnsureSuccessStatusCode();
+                var append = offset > 0 && response.StatusCode == HttpStatusCode.PartialContent;
+                if (offset > 0 && !append)
+                {
+                    try { File.Delete(partial); } catch { }
+                    offset = 0;
+                }
+
+                await using (var remote = await response.Content.ReadAsStreamAsync(cancellationToken))
+                await using (var local = new FileStream(partial, append ? FileMode.Append : FileMode.Create,
+                                 FileAccess.Write, FileShare.None, 1024 * 256,
+                                 FileOptions.Asynchronous | FileOptions.SequentialScan))
+                    await remote.CopyToAsync(local, cancellationToken);
+
+                var actualSize = new FileInfo(partial).Length;
+                if (file.Size > 0 && actualSize != file.Size)
+                {
+                    if (actualSize > file.Size)
+                    {
+                        try { File.Delete(partial); } catch { }
+                    }
+                    throw new InvalidDataException($"размер пока не совпадает с манифестом ({actualSize} / {file.Size} байт); сохранённая часть будет использована для продолжения");
+                }
+
+                if (!await VerifySha1Async(partial, file.Sha1, file.Size, cancellationToken))
+                {
+                    try { File.Delete(partial); } catch { }
+                    throw new InvalidDataException("SHA-1 не совпадает с манифестом UUP Dump; временный файл удалён.");
+                }
+                File.Move(partial, destination, true);
+                return;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) when (attempt < 5)
+            {
+                log($"  Ошибка загрузки {Path.GetFileName(file.Name)} ({attempt}/5): {ex.Message}. Повтор с паузой.");
+                await Task.Delay(TimeSpan.FromSeconds(Math.Min(16, Math.Pow(2, attempt - 1))), cancellationToken);
+                if (attempt == 2 || attempt == 4)
+                {
+                    try { current = await RefreshFileUrlAsync(buildId, file.Name, cancellationToken); } catch { }
+                }
+            }
         }
+
+        throw new IOException($"Не удалось скачать и проверить {Path.GetFileName(file.Name)} после 5 попыток.");
+    }
+
+    private static async Task<UupFile> RefreshFileUrlAsync(string buildId, string fileName, CancellationToken cancellationToken)
+    {
+        var refreshed = await GetRussianLanguageFilesAsync(buildId, cancellationToken);
+        var item = refreshed.FirstOrDefault(f => f.Name.Equals(fileName, StringComparison.OrdinalIgnoreCase));
+        return item ?? throw new InvalidOperationException("UUP Dump не вернул обновлённую ссылку для " + fileName);
     }
 
     private static async Task<bool> VerifySha1Async(
@@ -537,8 +630,34 @@ internal static class UupLanguagePackDownloader
 
     private static async Task<JsonDocument> GetJsonAsync(string url, CancellationToken cancellationToken)
     {
-        using var response = await Client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        HttpResponseMessage? response = null;
+        for (var attempt = 1; attempt <= 5; attempt++)
+        {
+            response?.Dispose();
+            try
+            {
+                response = await Client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                var status = (int)response.StatusCode;
+                if (status == 429 || status is 500 or 502 or 503 or 504)
+                {
+                    if (attempt == 5) response.EnsureSuccessStatusCode();
+                    var delay = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(Math.Pow(2, attempt - 1));
+                    if (delay < TimeSpan.Zero) delay = TimeSpan.Zero;
+                    if (delay > TimeSpan.FromSeconds(30)) delay = TimeSpan.FromSeconds(30);
+                    await Task.Delay(delay, cancellationToken);
+                    continue;
+                }
+                response.EnsureSuccessStatusCode();
+                break;
+            }
+            catch (HttpRequestException) when (attempt < 5)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt - 1)), cancellationToken);
+            }
+        }
+        if (response is null) throw new HttpRequestException("Не удалось связаться с UUP Dump API после повторных попыток.");
+        using (response)
+        {
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         var doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
         if (doc.RootElement.TryGetProperty("response", out var res) &&
@@ -549,6 +668,7 @@ internal static class UupLanguagePackDownloader
             throw new InvalidOperationException("UUP Dump API: " + message);
         }
         return doc;
+        }
     }
 
     private static int GetLanguagePackBaseBuild(int targetBuild)
