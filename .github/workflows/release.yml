@@ -1,0 +1,47 @@
+name: Publish preview release
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # A release is published only when a commit is deliberately titled "release: ...".
+    if: startsWith(github.event.head_commit.message, 'release:')
+    runs-on: windows-latest
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build self-contained Windows x64 EXE
+        shell: pwsh
+        run: dotnet publish src/LocalizerIoT/LocalizerIoT.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o artifacts/Localizer-IoT-win-x64
+
+      - name: Verify release files
+        shell: pwsh
+        run: |
+          $exe = "artifacts/Localizer-IoT-win-x64/Localizer-IoT.exe"
+          if (!(Test-Path $exe)) { throw "Expected EXE not found: $exe" }
+          if (!(Test-Path "CHANGELOG.md")) { throw "CHANGELOG.md not found." }
+          Get-FileHash $exe -Algorithm SHA256 | Format-List
+          Get-Item $exe | Format-List Name,Length,LastWriteTime
+
+      - name: Create GitHub Release and upload EXE
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "v0.1.0-alpha.1"
+          gh release view $tag --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Release/tag $tag already exists. Refusing to overwrite it."
+          }
+          gh release create $tag "artifacts/Localizer-IoT-win-x64/Localizer-IoT.exe" --repo "${{ github.repository }}" --title "Localizer-IoT $tag" --notes-file CHANGELOG.md --prerelease
