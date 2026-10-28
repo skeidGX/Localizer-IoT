@@ -856,7 +856,8 @@ internal static class ImageServicingEngine
             var component = match.Groups[1].Value;
             if (component.EndsWith("-Package", StringComparison.OrdinalIgnoreCase))
                 component = component.Substring(0, component.Length - "-Package".Length);
-            if (component.Equals("WinPE-WiFi", StringComparison.OrdinalIgnoreCase)) continue;
+            if (component.Equals("WinPE-WiFi", StringComparison.OrdinalIgnoreCase) ||
+                component.Equals("WinPE-LanguagePack", StringComparison.OrdinalIgnoreCase)) continue;
             components.Add(component);
         }
         return components.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
