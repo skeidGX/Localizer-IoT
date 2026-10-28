@@ -1,34 +1,45 @@
-# Localizer-IoT — Windows IoT Enterprise LTSC Russian Localizer
+# Localizer-IoT — русификация Windows IoT Enterprise LTSC
 
-A WinForms utility for inspecting a Windows installation ISO and servicing a selected Windows image with **locally supplied, compatible** language CAB/MSU packages.
+Windows Forms-приложение для обслуживания установочного ISO офлайн с помощью DISM и Windows ADK.
 
-## Build status
+## Сборка
 
-The project is being built on a Windows GitHub Actions runner as a self-contained `win-x64` single-file executable. See [Actions](https://github.com/skeidGX/Localizer-IoT/actions) for the live build and the downloadable workflow artifact.
+Последняя версия собирается на Windows GitHub Actions в автономный single-file `win-x64` EXE. [Состояние сборки и артефакты](https://github.com/skeidGX/Localizer-IoT/actions).
 
-## Current implementation
+## Что реализовано в текущей версии
 
-- GUI with ISO file picker and drag-and-drop support.
-- Reads `install.wim` / `install.esd` image indexes using Windows DISM.
-- Stages the ISO into a separate working folder; the selected source ISO is never used as the output path.
-- Applies supplied CAB/MSU packages to the selected Windows image and requests `ru-RU` system/user locale and Russian input.
-- Writes a separate bootable ISO using `oscdimg.exe` and writes a report alongside it.
-- Logs progress and servicing output.
+- Выбор исходного ISO и перетаскивание файлов в GUI.
+- Анализ индексов `install.wim` / `install.esd`, имени редакции, версии и архитектуры с DISM.
+- Автопоиск русских CAB-пакетов в выбранном каталоге или подключаемом LP/FOD ISO; возможность добавлять CAB вручную.
+- По умолчанию обрабатываются все индексы образа; можно выбрать один индекс.
+- Для `install.esd` экспортирует выбранные/all индексы в новый `install.wim`, не изменяя исходный ISO.
+- Применение основного русского Language Pack и обнаруженных CAB-пакетов к каждой выбранной редакции.
+- Попытка установить поддерживаемые language Features on Demand: Basic, OCR, Text-to-Speech, Speech и Handwriting, если в источнике есть соответствующие компоненты.
+- Настройка ru-RU для UI/системной локали/пользовательской локали/клавиатуры/часового пояса.
+- Обработка `boot.wim` с помощью соответствующих WinPE language optional components, если доступны совместимые пакеты.
+- Попытка локализовать встроенный `winre.wim`, если WinPE языковые CAB присутствуют в Language/FoD source.
+- Можно указать отдельный Russian Windows ISO/папку с `sources\ru-ru` для локализованных ресурсов Windows Setup.
+- Добавление `autounattend.xml` только с региональными параметрами, если в исходной раздаче такого файла нет; страницы выбора диска/учётной записи автоматически не скрываются.
+- Генерация `lang.ini`, создание отдельного загрузочного ISO с `oscdimg.exe`, логирование и отчёт `.report.txt`.
+- CAB-only servicing: MSU не принимаются, потому что проект не должен обновлять Windows.
 
-## Important limitations of this initial build
+## Что не может гарантировать текущая версия
 
-- **Automatic language-pack discovery/download is not implemented yet.** The user must provide packages that exactly match the target release, build, architecture, and servicing level.
-- This version services only the selected `install.wim` image. It does **not** yet service `boot.wim` / Windows Setup, WinPE, WinRE, OOBE resources, or every edition index.
-- `oscdimg.exe` from Windows ADK Deployment Tools must already be installed. DISM is supplied by Windows.
-- A successful compilation is not proof that a produced ISO boots or that all UI components are Russian. Test output in a virtual machine before deployment.
+- Автоматическое скачивание подходящего Language Pack/FoD ISO пока не реализовано. Эти пакеты должны соответствовать версии, сборке, архитектуре и каналу распространения целевой Windows; их необходимо получить из лицензированного/официального источника. UUP Dump предоставляет API и UUP-наборы для сборки Windows-носителей, но это не универсальная прямая ссылка на совместимый LP/FOD ISO.
+- Совместимость пакетов проверяется на этапе обслуживания DISM. Для WinPE/WinRE особенно важно совпадение с выпуском Windows и соответствующим WinPE add-on; неподходящие компоненты отражаются в отчёте, но в таком случае локализация может быть неполной.
+- Для полного Setup UI, кроме пакетов WinPE, нужны соответствующие русские файлы `sources\ru-ru`; при наличии другого языка нужно указать Russian Windows media того же выпуска.
+- `oscdimg.exe` из Windows ADK Deployment Tools должен быть установлен. DISM входит в поддерживаемую Windows.
+- Успешная компиляция не доказывает, что созданный ISO загружается. Текущий проект ещё не прошёл end-to-end проверку на реальном Windows IoT Enterprise LTSC ISO и в виртуальной машине.
 
-## Requirements
+## Требования
 
-- Windows 10/11 x64.
-- Administrator rights for image servicing.
-- Compatible language CAB/MSU packages.
-- Windows ADK Deployment Tools (`oscdimg.exe`) for ISO creation.
+- Windows 10/11 x64 как рабочая станция обслуживания.
+- Запуск от администратора.
+- Основной CAB Language Pack `ru-RU` под архитектуру целевого образа.
+- Совместимые CAB из Languages and Optional Features/FoD media для желаемых языковых возможностей.
+- Совместимые WinPE language optional components (ADK/WinPE add-on) для полной локализации загрузочного установщика.
+- Windows ADK Deployment Tools (`oscdimg.exe`) для создания ISO.
 
-## Safety
+## Безопасность
 
-The tool refuses to use the same path for source and output. Keep a backup of the source ISO and test the output before deploying it to physical hardware.
+Исходный ISO копируется во временную рабочую папку и не редактируется. Перед записью выходного ISO проверяется, что путь отличается от исходного. Сначала тестируйте результат в виртуальной машине, затем на устройстве.
