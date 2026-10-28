@@ -25,7 +25,7 @@ public sealed class MainForm : Form
     private readonly Button _saveProfile = new() { Text = "Сохранить профиль…", AutoSize = true };
     private readonly Button _loadProfile = new() { Text = "Загрузить профиль…", AutoSize = true };
     private readonly Button _exportBundle = new() { Text = "Экспорт офлайн-пакета…", AutoSize = true };
-    private readonly CheckBox _useWindowsUpdateForCapabilities = new() { Text = "Разрешить Windows Update только для FOD установленной Windows (не WinRE/обновления ОС)", AutoSize = true, Checked = false };
+    private readonly CheckBox _useWindowsUpdateForCapabilities = new() { Text = "Разрешить Windows Update для недостающих FOD (не обновляет ОС)", AutoSize = true, Checked = false };
     private readonly Label _isoSummary = new() { AutoSize = true, Text = "Исходный ISO ещё не выбран." };
     private readonly Label _sourceSummary = new() { AutoSize = true, Text = "Языковые источники: не выбраны." };
     private readonly Label _progressDetail = new() { AutoSize = false, Height = 24, Text = "Готово к работе.", AutoEllipsis = true };
@@ -1185,7 +1185,7 @@ public sealed class MainForm : Form
                 }
             });
             File.Move(temp, output, true);
-            _progress.Value = 100;
+            SetProgressUi(100);
             Log("Офлайн-пакет создан: " + output);
             MessageBox.Show(this, "Офлайн-пакет создан. Внутри — найденные русские Language Pack/FOD/WinPE CAB и ресурсы sources\\ru-ru, если они были в папках-источниках. LCU/SSU/KB/MSU не включаются. Проверьте bundle-manifest.txt.",
                 "Экспорт завершён", MessageBoxButtons.OK, MessageBoxIcon.Information);
