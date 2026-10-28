@@ -7,6 +7,7 @@ public sealed class MainForm : Form
 {
     private readonly TextBox _iso = new() { Dock = DockStyle.Fill, AllowDrop = true };
     private readonly TextBox _packageSource = new() { Dock = DockStyle.Fill, AllowDrop = true };
+    private readonly TextBox _setupSource = new() { Dock = DockStyle.Fill, AllowDrop = true };
     private readonly TextBox _packages = new() { Dock = DockStyle.Fill, Multiline = true, ScrollBars = ScrollBars.Vertical };
     private readonly TextBox _output = new() { Dock = DockStyle.Fill };
     private readonly NumericUpDown _index = new() { Minimum = 1, Maximum = 999, Value = 1, Width = 82 };
@@ -35,6 +36,16 @@ public sealed class MainForm : Form
         _iso.DragDrop += (_, e) => HandleDrop(e, false);
         _packageSource.DragEnter += OnDragEnter;
         _packageSource.DragDrop += (_, e) => HandleDrop(e, true);
+        _setupSource.DragEnter += OnDragEnter;
+        _setupSource.DragDrop += (_, e) =>
+        {
+            if (e.Data?.GetData(DataFormats.FileDrop) is string[] files)
+            {
+                var candidate = files.FirstOrDefault(p => Directory.Exists(p) ||
+                    (File.Exists(p) && Path.GetExtension(p).Equals(".iso", StringComparison.OrdinalIgnoreCase)));
+                if (candidate is not null) _setupSource.Text = candidate;
+            }
+        };
         _inspect.Click += async (_, _) => await InspectIsoAsync();
         _browseCab.Click += (_, _) => SelectCabFiles();
         _run.Click += async (_, _) => await RunLocalizationAsync();
@@ -46,7 +57,8 @@ public sealed class MainForm : Form
 
     private void BuildLayout()
     {
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 8 };
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 9 };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -102,6 +114,29 @@ public sealed class MainForm : Form
         mediaPanel.Controls.Add(pickMediaIso, 2, 0);
         mediaPanel.Controls.Add(pickMediaFolder, 3, 0);
         root.Controls.Add(mediaPanel);
+
+        var setupPanel = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 4, AutoSize = true };
+        setupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        setupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        setupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        setupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        setupPanel.Controls.Add(new Label { Text = "Русские ресурсы Setup (опционально):", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
+        setupPanel.Controls.Add(_setupSource, 1, 0);
+        var pickSetupIso = new Button { Text = "ISO…", AutoSize = true };
+        pickSetupIso.Click += (_, _) =>
+        {
+            using var d = new OpenFileDialog { Filter = "ISO-образы (*.iso)|*.iso", Title = "Выберите соответствующий Russian Windows ISO с sources\\ru-ru" };
+            if (d.ShowDialog(this) == DialogResult.OK) _setupSource.Text = d.FileName;
+        };
+        var pickSetupFolder = new Button { Text = "Папка…", AutoSize = true };
+        pickSetupFolder.Click += (_, _) =>
+        {
+            using var d = new FolderBrowserDialog { Description = "Выберите распакованный Russian Windows media, содержащий sources\\ru-ru" };
+            if (d.ShowDialog(this) == DialogResult.OK) _setupSource.Text = d.SelectedPath;
+        };
+        setupPanel.Controls.Add(pickSetupIso, 2, 0);
+        setupPanel.Controls.Add(pickSetupFolder, 3, 0);
+        root.Controls.Add(setupPanel);
 
         var packagePanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2 };
         packagePanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -235,10 +270,14 @@ public sealed class MainForm : Form
             MessageBox.Show(this, "Выходной ISO должен иметь отдельный путь от исходного.");
             return;
         }
-        if (!string.IsNullOrWhiteSpace(_packageSource.Text) && !Directory.Exists(_packageSource.Text.Trim()) &&
-            !(File.Exists(_packageSource.Text.Trim()) && Path.GetExtension(_packageSource.Text.Trim()).Equals(".iso", StringComparison.OrdinalIgnoreCase)))
+        if (!IsValidMediaPath(_packageSource.Text))
         {
             MessageBox.Show(this, "Источник LP/FOD должен быть существующей папкой или ISO-файлом.");
+            return;
+        }
+        if (!IsValidMediaPath(_setupSource.Text))
+        {
+            MessageBox.Show(this, "Источник ресурсов Setup должен быть существующей папкой или ISO-файлом.");
             return;
         }
         if (File.Exists(output) && MessageBox.Show(this, "Выходной ISO уже существует. Перезаписать?", "Подтверждение",
@@ -249,6 +288,7 @@ public sealed class MainForm : Form
         var request = new LocalizationRequest(
             Path.GetFullPath(_iso.Text.Trim()),
             string.IsNullOrWhiteSpace(_packageSource.Text) ? null : Path.GetFullPath(_packageSource.Text.Trim()),
+            string.IsNullOrWhiteSpace(_setupSource.Text) ? null : Path.GetFullPath(_setupSource.Text.Trim()),
             cabFiles,
             Path.GetFullPath(output),
             _allIndexes.Checked,
@@ -273,6 +313,13 @@ public sealed class MainForm : Form
             MessageBox.Show(this, ex.Message, "Русификация не завершена", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally { SetBusy(false); }
+    }
+
+    private static bool IsValidMediaPath(string value)
+    {
+        var p = value.Trim();
+        return string.IsNullOrWhiteSpace(p) || Directory.Exists(p) ||
+            (File.Exists(p) && Path.GetExtension(p).Equals(".iso", StringComparison.OrdinalIgnoreCase));
     }
 
     private bool ValidateIso()
