@@ -1,0 +1,36 @@
+name: Build Windows application
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Build self-contained single-file EXE
+        shell: pwsh
+        run: dotnet publish src/LocalizerIoT/LocalizerIoT.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o artifacts/Localizer-IoT-win-x64
+      - name: Verify executable exists
+        shell: pwsh
+        run: |
+          $exe = "artifacts/Localizer-IoT-win-x64/Localizer-IoT.exe"
+          if (!(Test-Path $exe)) { throw "Expected EXE not found: $exe" }
+          Get-Item $exe | Format-List Name,Length,LastWriteTime
+      - name: Upload portable EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: Localizer-IoT-win-x64
+          path: artifacts/Localizer-IoT-win-x64/Localizer-IoT.exe
+          if-no-files-found: error
+          retention-days: 14
