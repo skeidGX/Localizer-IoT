@@ -199,7 +199,7 @@ internal static class ImageServicingEngine
                 currentMount = true;
                 try
                 {
-                    ApplyCabPackages(dism, mountDir, windowsPackages, report, progress, 25, 40);
+                    ApplyCabPackages(dism, mountDir, windowsPackages, imageInfo.Version, imageInfo.Architecture, warnings, report, progress, 25, 40);
                     TryAddLanguageCapabilities(dism, mountDir, packages.ToArray(), capabilitySources, warnings, report, progress);
                     SetRussianDefaults(dism, mountDir, warnings, report, progress);
                     TryServiceWinRe(dism, mountDir, work, windowsPackages, packages.ToArray(), capabilitySources, warnings, report, progress);
@@ -293,8 +293,8 @@ internal static class ImageServicingEngine
         }
     }
 
-    private static void ApplyCabPackages(string dism, string mountDir, string[] packages, Action<int, string> report,
-        int baseProgress, int range, int offset)
+    private static void ApplyCabPackages(string dism, string mountDir, string[] packages, string targetVersion, string targetArchitecture,
+        List<string> warnings, Action<int, string> report, int baseProgress, int range, int offset)
     {
         var apply = packages.Where(p => !IsLanguageFeatureSatellite(p)).ToArray();
         if (apply.Length == 0) throw new InvalidOperationException("Не найдено применимых CAB-пакетов русского языка.");
@@ -302,11 +302,52 @@ internal static class ImageServicingEngine
         {
             var package = apply[i];
             var p = Math.Clamp(baseProgress + offset + (int)(range * (double)i / apply.Length), 0, 96);
-            report(p, $"Добавляю языковой пакет {i + 1}/{apply.Length}: {Path.GetFileName(package)}");
+            report(p, $"Проверяю совместимость и добавляю языковой пакет {i + 1}/{apply.Length}: {Path.GetFileName(package)}");
+            ValidatePackageCompatibility(dism, package, targetVersion, targetArchitecture, warnings);
             var add = Run(dism, "/Image:" + mountDir, "/Add-Package", "/PackagePath:" + package);
             if (add.ExitCode != 0)
                 throw new InvalidOperationException($"DISM не смог добавить пакет {Path.GetFileName(package)}. Возможны несовпадение версии/архитектуры или отсутствие зависимости.\r\n{ShortOutput(add.Output)}");
         }
+    }
+
+    private static void ValidatePackageCompatibility(string dism, string package, string targetVersion, string targetArchitecture, List<string> warnings)
+    {
+        var info = Run(dism, "/English", "/Get-PackageInfo", "/PackagePath:" + package);
+        if (info.ExitCode != 0)
+        {
+            AddWarning(warnings, $"Не удалось заранее прочитать метаданные CAB {Path.GetFileName(package)}; совместимость проверит DISM при установке.");
+            return;
+        }
+
+        var identityMatch = Regex.Match(info.Output, @"(?im)^\s*Package Identity\s*:\s*(.+)$");
+        if (!identityMatch.Success) identityMatch = Regex.Match(info.Output, @"(?im)^\s*Identity\s*:\s*(.+)$");
+        if (!identityMatch.Success) return;
+        var identity = identityMatch.Groups[1].Value.Trim();
+
+        var targetBuild = GetBuildVersion(targetVersion);
+        var packageVersionMatch = Regex.Match(identity, @"~(?<version>\d+\.\d+\.\d+(?:\.\d+)?)\s*$");
+        if (targetBuild is not null && packageVersionMatch.Success)
+        {
+            var packageBuild = GetBuildVersion(packageVersionMatch.Groups["version"].Value);
+            if (packageBuild is not null && !packageBuild.Equals(targetBuild, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    $"CAB {Path.GetFileName(package)} имеет версию {packageVersionMatch.Groups["version"].Value}, а выбранный образ — {targetVersion}. Сборки не совпадают; пакет не устанавливается.");
+        }
+
+        var archMatch = Regex.Match(identity, @"~(?<arch>amd64|x86|arm64)~", RegexOptions.IgnoreCase);
+        if (archMatch.Success)
+        {
+            var packageArch = archMatch.Groups["arch"].Value.ToLowerInvariant();
+            var targetArch = targetArchitecture.Equals("x64", StringComparison.OrdinalIgnoreCase) ? "amd64" : targetArchitecture.ToLowerInvariant();
+            if (!packageArch.Equals(targetArch, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"CAB {Path.GetFileName(package)} рассчитан на {packageArch}, а образ имеет архитектуру {targetArchitecture}.");
+        }
+    }
+
+    private static string? GetBuildVersion(string version)
+    {
+        var match = Regex.Match(version ?? "", @"(?<build>\d+\.\d+\.\d+)(?:\.\d+)?");
+        return match.Success ? match.Groups["build"].Value : null;
     }
 
     private static void TryAddLanguageCapabilities(string dism, string mountDir, string[] packages, string[] capabilitySources, List<string> warnings,
@@ -555,17 +596,17 @@ internal static class ImageServicingEngine
   <settings pass=""windowsPE"">
     <component name=""Microsoft-Windows-International-Core-WinPE"" processorArchitecture=""{arch}"" publicKeyToken=""31bf3856ad364e35"" language=""neutral"" versionScope=""nonSxS"">
       <SetupUILanguage><UILanguage>ru-RU</UILanguage></SetupUILanguage>
-      <InputLocale>ru-RU;en-US</InputLocale><SystemLocale>ru-RU</SystemLocale><UILanguage>ru-RU</UILanguage><UserLocale>ru-RU</UserLocale>
+      <InputLocale>0419:00000419;0409:00000409</InputLocale><SystemLocale>ru-RU</SystemLocale><UILanguage>ru-RU</UILanguage><UserLocale>ru-RU</UserLocale><UILanguageFallback>en-US</UILanguageFallback>
     </component>
   </settings>
   <settings pass=""specialize"">
     <component name=""Microsoft-Windows-International-Core"" processorArchitecture=""{arch}"" publicKeyToken=""31bf3856ad364e35"" language=""neutral"" versionScope=""nonSxS"">
-      <InputLocale>ru-RU;en-US</InputLocale><SystemLocale>ru-RU</SystemLocale><UILanguage>ru-RU</UILanguage><UserLocale>ru-RU</UserLocale>
+      <InputLocale>0419:00000419;0409:00000409</InputLocale><SystemLocale>ru-RU</SystemLocale><UILanguage>ru-RU</UILanguage><UserLocale>ru-RU</UserLocale><UILanguageFallback>en-US</UILanguageFallback>
     </component>
   </settings>
   <settings pass=""oobeSystem"">
     <component name=""Microsoft-Windows-International-Core"" processorArchitecture=""{arch}"" publicKeyToken=""31bf3856ad364e35"" language=""neutral"" versionScope=""nonSxS"">
-      <InputLocale>ru-RU;en-US</InputLocale><SystemLocale>ru-RU</SystemLocale><UILanguage>ru-RU</UILanguage><UserLocale>ru-RU</UserLocale>
+      <InputLocale>0419:00000419;0409:00000409</InputLocale><SystemLocale>ru-RU</SystemLocale><UILanguage>ru-RU</UILanguage><UserLocale>ru-RU</UserLocale><UILanguageFallback>en-US</UILanguageFallback>
     </component>
   </settings>
 </unattend>";
