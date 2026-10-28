@@ -10,6 +10,7 @@ internal sealed record ImageIndexInfo(int Index, string Name, string Architectur
 internal sealed record LocalizationRequest(
     string SourceIso,
     string? PackageSource,
+    string? FodSource,
     string? RussianSetupMedia,
     string[] ExplicitCabFiles,
     string OutputIso,
@@ -92,6 +93,7 @@ internal static class ImageServicingEngine
         string? targetIsoLetter = null;
         string? packageIsoLetter = null;
         string? packageRoot = null;
+        string? fodIsoLetter = null;
         string? setupMediaLetter = null;
         string? setupMediaRoot = null;
         var mountDir = Path.Combine(work, "mount");
@@ -131,6 +133,22 @@ internal static class ImageServicingEngine
                     setupMediaRoot = setupMediaLetter + @":\";
                 }
                 else throw new InvalidOperationException("Источник ресурсов Windows Setup должен быть существующей папкой или ISO-файлом.");
+            }
+            if (!string.IsNullOrWhiteSpace(request.FodSource))
+            {
+                var fodSource = request.FodSource.Trim();
+                var sameAsPackageSource = !string.IsNullOrWhiteSpace(request.PackageSource) &&
+                    PathComparer.Equals(Path.GetFullPath(fodSource), Path.GetFullPath(request.PackageSource.Trim()));
+                if (!sameAsPackageSource)
+                {
+                    if (Directory.Exists(fodSource)) packageRoots.Add(Path.GetFullPath(fodSource));
+                    else if (File.Exists(fodSource) && Path.GetExtension(fodSource).Equals(".iso", StringComparison.OrdinalIgnoreCase))
+                    {
+                        fodIsoLetter = MountIso(Path.GetFullPath(fodSource));
+                        packageRoots.Add(fodIsoLetter + @":\\");
+                    }
+                    else throw new InvalidOperationException("Источник Features on Demand должен быть существующей папкой или ISO-файлом.");
+                }
             }
             packageRoots.AddRange(request.ExplicitCabFiles.Where(File.Exists).Select(Path.GetDirectoryName).Where(p => p is not null).Cast<string>());
             packageRoots = packageRoots.Distinct(PathComparer).ToList();
@@ -286,6 +304,8 @@ internal static class ImageServicingEngine
                 TryDismountIso(Path.GetFullPath(request.PackageSource));
             if (setupMediaLetter is not null && !string.IsNullOrWhiteSpace(request.RussianSetupMedia))
                 TryDismountIso(Path.GetFullPath(request.RussianSetupMedia));
+            if (fodIsoLetter is not null && !string.IsNullOrWhiteSpace(request.FodSource))
+                TryDismountIso(Path.GetFullPath(request.FodSource));
             try { Run(dism, "/Cleanup-Wim"); } catch { }
             try { Directory.Delete(work, true); } catch { }
             try { if (File.Exists(tempOutputIso)) File.Delete(tempOutputIso); } catch { }
