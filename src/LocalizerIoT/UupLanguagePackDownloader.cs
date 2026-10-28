@@ -100,7 +100,11 @@ internal static class UupLanguagePackDownloader
                 var esdFiles = new System.Collections.Concurrent.ConcurrentBag<string>();
                 var completedDownloads = 0;
                 var downloadErrors = new System.Collections.Concurrent.ConcurrentBag<string>();
+                var totalBytes = files.Count > 0 && files.All(f => f.Size > 0) ? files.Sum(f => f.Size) : 0L;
+                long downloadedBytes = 0;
+                var showByteProgress = totalBytes > 0;
                 log($"Загружаю файлы параллельно (до 3 потоков); подтверждённые файлы кеша будут переиспользованы.");
+                if (showByteProgress) log($"Размер языковых файлов по манифесту: {totalBytes / (1024.0 * 1024.0):N1} МиБ.");
                 await Parallel.ForEachAsync(files, new ParallelOptions
                 {
                     MaxDegreeOfParallelism = 3,
@@ -112,7 +116,12 @@ internal static class UupLanguagePackDownloader
                     var localPath = Path.Combine(cacheRoot, safeName);
                     try
                     {
-                        await DownloadAndVerifyFileAsync(file, localPath, build.Id, log, ct);
+                        Action<long>? byteProgress = showByteProgress ? delta =>
+                        {
+                            var current = Interlocked.Add(ref downloadedBytes, delta);
+                            progress?.Invoke(Math.Clamp(5 + (int)(35.0 * current / totalBytes), 5, 40));
+                        } : null;
+                        await DownloadAndVerifyFileAsync(file, localPath, build.Id, log, byteProgress, ct);
                         if (Path.GetExtension(localPath).Equals(".esd", StringComparison.OrdinalIgnoreCase))
                             esdFiles.Add(localPath);
                         else if (Path.GetExtension(localPath).Equals(".cab", StringComparison.OrdinalIgnoreCase))
@@ -129,7 +138,8 @@ internal static class UupLanguagePackDownloader
                         log($"  Не удалось получить {safeName}: {ex.Message}");
                     }
                     var completed = Interlocked.Increment(ref completedDownloads);
-                    progress?.Invoke(Math.Clamp(5 + (int)(35.0 * completed / Math.Max(1, files.Count)), 5, 40));
+                    if (!showByteProgress)
+                        progress?.Invoke(Math.Clamp(5 + (int)(35.0 * completed / Math.Max(1, files.Count)), 5, 40));
                 });
                 foreach (var error in downloadErrors) errors.Add(error);
 
@@ -369,15 +379,23 @@ internal static class UupLanguagePackDownloader
     }
 
     private static async Task DownloadAndVerifyFileAsync(
-        UupFile file, string destination, string buildId, Action<string> log, CancellationToken cancellationToken)
+        UupFile file, string destination, string buildId, Action<string> log, Action<long>? byteProgress, CancellationToken cancellationToken)
     {
         if (File.Exists(destination) && await VerifySha1Async(destination, file.Sha1, file.Size, cancellationToken))
         {
             log("  Кеш подтверждён: " + Path.GetFileName(destination));
+            if (file.Size > 0) byteProgress?.Invoke(file.Size);
             return;
         }
 
         var partial = destination + ".partial";
+        long locallyCreditedBytes = 0;
+        void ReportByteDelta(long delta)
+        {
+            if (delta == 0) return;
+            locallyCreditedBytes += delta;
+            byteProgress?.Invoke(delta);
+        }
         var current = file;
         if (current.ExpiresAt > 0 && DateTimeOffset.FromUnixTimeSeconds(current.ExpiresAt) < DateTimeOffset.UtcNow.AddMinutes(2))
             current = await RefreshFileUrlAsync(buildId, file.Name, cancellationToken);
@@ -388,6 +406,7 @@ internal static class UupLanguagePackDownloader
             try
             {
                 var offset = File.Exists(partial) ? new FileInfo(partial).Length : 0L;
+                ReportByteDelta(offset - locallyCreditedBytes);
                 if (file.Size > 0 && offset >= file.Size)
                 {
                     if (offset == file.Size && await VerifySha1Async(partial, file.Sha1, file.Size, cancellationToken))
@@ -395,6 +414,7 @@ internal static class UupLanguagePackDownloader
                         File.Move(partial, destination, true);
                         return;
                     }
+                    ReportByteDelta(-offset);
                     File.Delete(partial);
                     offset = 0;
                 }
@@ -413,6 +433,7 @@ internal static class UupLanguagePackDownloader
 
                 if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable && offset > 0)
                 {
+                    ReportByteDelta(-offset);
                     try { File.Delete(partial); } catch { }
                     continue;
                 }
@@ -433,21 +454,40 @@ internal static class UupLanguagePackDownloader
                 var append = offset > 0 && response.StatusCode == HttpStatusCode.PartialContent;
                 if (offset > 0 && !append)
                 {
+                    ReportByteDelta(-offset);
                     try { File.Delete(partial); } catch { }
                     offset = 0;
+                }
+                if (append && response.Content.Headers.ContentRange?.From is long rangeStart && rangeStart != offset)
+                {
+                    ReportByteDelta(-offset);
+                    try { File.Delete(partial); } catch { }
+                    log("  Сервер вернул несовпадающий Content-Range; часть будет скачана заново.");
+                    continue;
                 }
 
                 await using (var remote = await response.Content.ReadAsStreamAsync(cancellationToken))
                 await using (var local = new FileStream(partial, append ? FileMode.Append : FileMode.Create,
                                  FileAccess.Write, FileShare.None, 1024 * 256,
                                  FileOptions.Asynchronous | FileOptions.SequentialScan))
-                    await remote.CopyToAsync(local, cancellationToken);
+                {
+                    var buffer = new byte[1024 * 256];
+                    while (true)
+                    {
+                        var read = await remote.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+                        if (read <= 0) break;
+                        await local.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                        ReportByteDelta(read);
+                    }
+                    await local.FlushAsync(cancellationToken);
+                }
 
                 var actualSize = new FileInfo(partial).Length;
                 if (file.Size > 0 && actualSize != file.Size)
                 {
                     if (actualSize > file.Size)
                     {
+                        ReportByteDelta(-actualSize);
                         try { File.Delete(partial); } catch { }
                     }
                     throw new InvalidDataException($"размер пока не совпадает с манифестом ({actualSize} / {file.Size} байт); сохранённая часть будет использована для продолжения");
@@ -455,6 +495,7 @@ internal static class UupLanguagePackDownloader
 
                 if (!await VerifySha1Async(partial, file.Sha1, file.Size, cancellationToken))
                 {
+                    ReportByteDelta(-actualSize);
                     try { File.Delete(partial); } catch { }
                     throw new InvalidDataException("SHA-1 не совпадает с манифестом UUP Dump; временный файл удалён.");
                 }
