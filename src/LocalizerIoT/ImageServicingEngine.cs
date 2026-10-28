@@ -1209,10 +1209,45 @@ internal static class ImageServicingEngine
 
             var bootInfo = ReadImageInfo(dism, bootWim, 2);
             var roots = new List<string>();
-            foreach (var root in extraRoots.Where(Directory.Exists))
+            foreach (var source in extraRoots)
             {
-                var found = FindWinPePackageRoot(new[] { root });
-                if (found is not null) roots.Add(found);
+                string? extraMountedLetter = null;
+                var root = source;
+                try
+                {
+                    if (Directory.Exists(source))
+                    {
+                        root = Path.GetFullPath(source);
+                    }
+                    else if (File.Exists(source) && Path.GetExtension(source).Equals(".iso", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (PathComparer.Equals(Path.GetFullPath(source), Path.GetFullPath(sourceIso)))
+                        {
+                            root = mounted + ":" + Path.DirectorySeparatorChar;
+                        }
+                        else
+                        {
+                            extraMountedLetter = MountIso(Path.GetFullPath(source));
+                            root = extraMountedLetter + ":" + Path.DirectorySeparatorChar;
+                        }
+                    }
+                    else
+                    {
+                        continue;
+                    }
+
+                    var found = FindWinPePackageRoot(new[] { root });
+                    if (found is not null) roots.Add(found);
+                    else log($"В источнике {source} не найдена структура WinPE_OCs\\ru-ru.");
+                }
+                catch (Exception ex)
+                {
+                    log($"Не удалось проверить WinPE-ресурсы из {source}: {ex.Message}");
+                }
+                finally
+                {
+                    if (extraMountedLetter is not null) TryDismountIso(Path.GetFullPath(source));
+                }
             }
 
             var adkRoot = FindAdkWinPePackageRoot(bootInfo.Architecture);
