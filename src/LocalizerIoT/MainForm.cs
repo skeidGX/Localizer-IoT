@@ -377,27 +377,51 @@ public sealed class MainForm : Form
             finally { SetBusy(false); }
         }
 
-        if (ImageServicingEngine.FindOscdimgPath() is null)
-        {
-            var choice = MessageBox.Show(this,
-                "На компьютере не найден oscdimg.exe. Скачать официальный установщик Microsoft ADK и автоматически установить только Deployment Tools?\n\nУстановщик проверяется по цифровой подписи Microsoft. Потребуется интернет и свободное место. Компоненты WinPE дополнительно могут понадобиться для полной локализации установщика Windows.",
-                "Нужен компонент для создания ISO", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
-            if (choice != DialogResult.Yes) return;
+        var hasOscdimg = ImageServicingEngine.FindOscdimgPath() is not null;
+        var extraWinPeRoots = new[] { _packageSource.Text.Trim(), _fodSource.Text.Trim(), _setupSource.Text.Trim() }
+            .Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var hasCompatibleWinPe = await Task.Run(() =>
+            ImageServicingEngine.HasCompatibleWinPePackages(_iso.Text.Trim(), extraWinPeRoots, Log));
 
-            SetBusy(true);
-            try
+        if (!hasOscdimg || !hasCompatibleWinPe)
+        {
+            var missing = new List<string>();
+            if (!hasOscdimg) missing.Add("oscdimg.exe для создания загрузочного ISO");
+            if (!hasCompatibleWinPe) missing.Add("WinPE language components ru-RU, совместимые с boot.wim");
+            var choice = MessageBox.Show(this,
+                "Не обнаружены все компоненты для полной локализации Setup:\n- " + string.Join("\n- ", missing) +
+                "\n\nСкачать официальный установщик ADK и WinPE add-on с Microsoft, проверить их цифровые подписи и установить совместимый набор? Установка может занять значительное место и время; целевая Windows обновляться не будет.",
+                "Нужны совместимые инструменты ADK / WinPE", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+            if (choice == DialogResult.Yes)
             {
-                _progress.Value = 0;
-                await ImageServicingEngine.EnsureDeploymentToolsAsync(Log);
-                _progress.Value = 5;
+                SetBusy(true);
+                try
+                {
+                    _progress.Value = 0;
+                    if (hasCompatibleWinPe)
+                        await ImageServicingEngine.EnsureDeploymentToolsAsync(Log);
+                    else
+                        await ImageServicingEngine.EnsureCompatibleSetupToolsAsync(_iso.Text.Trim(), Log);
+                    _progress.Value = 5;
+                }
+                catch (Exception ex)
+                {
+                    Log("Не удалось подготовить ADK/WinPE: " + ex.Message);
+                    MessageBox.Show(this, ex.Message, "Установка ADK/WinPE не завершена", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    if (ImageServicingEngine.FindOscdimgPath() is null) return;
+                }
+                finally { SetBusy(false); }
             }
-            catch (Exception ex)
+            else if (!hasOscdimg)
             {
-                Log("Не удалось автоматически установить Deployment Tools: " + ex.Message);
-                MessageBox.Show(this, ex.Message, "Установка ADK не завершена", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Log("Создание ISO невозможно без oscdimg.exe; обработка остановлена.");
                 return;
             }
-            finally { SetBusy(false); }
+            else if (!hasCompatibleWinPe)
+            {
+                Log("Пользователь пропустил установку WinPE add-on; установка Windows может остаться частично на английском.");
+            }
+
             if (ImageServicingEngine.FindOscdimgPath() is null)
             {
                 MessageBox.Show(this, "oscdimg.exe всё ещё не найден. Обработка не начата.");
