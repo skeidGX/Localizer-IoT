@@ -12,6 +12,7 @@ All notable changes to Localizer-IoT are documented here.
 
 ### Notes
 - Fallback UUP entries are only discovery seeds: the app still checks language availability and fetches file metadata live from UUP Dump before downloading.
+- The release workflow now derives its tag from the first line of a `release: vMAJOR.MINOR.PATCH[-prerelease]` commit title.
 - This alpha remains best-effort. The new fallback was not verified end-to-end against the user's ISO or a VM boot test.
 
 ## [0.1.0-alpha.1] — 2026-10-28
