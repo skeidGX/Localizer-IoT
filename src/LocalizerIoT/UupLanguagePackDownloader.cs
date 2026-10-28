@@ -198,7 +198,9 @@ internal static class UupLanguagePackDownloader
                 if (allFeatureCabs == 0)
                     log("В наборе нет явно именованных Language Features CAB. OCR, речь и рукописный ввод потребуют дополнительного совместимого FOD-источника.");
 
-                await SaveCacheManifestAsync(cacheRoot, build, targetBuild, baseBuild, arch, log, cancellationToken);
+                try { await SaveCacheManifestAsync(cacheRoot, build, files, targetBuild, baseBuild, arch, log, cancellationToken); }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) { log("Не удалось записать манифест кеша; скачанные файлы остаются доступными: " + ex.Message); }
                 progress?.Invoke(65);
                 log($"Русский Language Pack готов. CAB в кеше: {Directory.EnumerateFiles(cacheRoot, "*.cab").Count()}; Language Features CAB: {allFeatureCabs}.");
                 if (cacheOk == 0)
@@ -225,15 +227,29 @@ internal static class UupLanguagePackDownloader
     }
 
     private static async Task SaveCacheManifestAsync(
-        string cacheRoot, UupBuild build, int targetBuild, int baseBuild, string architecture,
+        string cacheRoot, UupBuild build, IReadOnlyCollection<UupFile> payloads, int targetBuild, int baseBuild, string architecture,
         Action<string> log, CancellationToken cancellationToken)
     {
         var entries = new List<CacheManifestEntry>();
+        var payloadByName = payloads.ToDictionary(f => Path.GetFileName(f.Name), StringComparer.OrdinalIgnoreCase);
+        var allowedCabNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var payload in payloads)
+        {
+            var extension = Path.GetExtension(payload.Name);
+            if (extension.Equals(".cab", StringComparison.OrdinalIgnoreCase)) allowedCabNames.Add(Path.GetFileName(payload.Name));
+            else if (extension.Equals(".esd", StringComparison.OrdinalIgnoreCase)) allowedCabNames.Add(Path.ChangeExtension(Path.GetFileName(payload.Name), ".cab"));
+        }
         foreach (var cab in Directory.EnumerateFiles(cacheRoot, "*.cab", SearchOption.TopDirectoryOnly))
         {
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
+                var cabName = Path.GetFileName(cab);
+                if (!allowedCabNames.Contains(cabName)) continue;
+                var sourceName = payloadByName.ContainsKey(cabName) ? cabName : Path.ChangeExtension(cabName, ".esd");
+                if (!payloadByName.TryGetValue(sourceName, out var sourcePayload)) continue;
+                var sourcePath = Path.Combine(cacheRoot, sourceName);
+                if (!await VerifySha1Async(sourcePath, sourcePayload.Sha1, sourcePayload.Size, cancellationToken)) continue;
                 if (!await VerifyCabPackageAsync(cab, cancellationToken)) continue;
                 await using var stream = new FileStream(cab, FileMode.Open, FileAccess.Read, FileShare.Read,
                     1024 * 256, FileOptions.Asynchronous | FileOptions.SequentialScan);
