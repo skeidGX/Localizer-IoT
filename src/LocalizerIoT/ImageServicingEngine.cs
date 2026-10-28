@@ -153,8 +153,16 @@ internal static class ImageServicingEngine
             packageRoots.AddRange(request.ExplicitCabFiles.Where(File.Exists).Select(Path.GetDirectoryName).Where(p => p is not null).Cast<string>());
             packageRoots = packageRoots.Distinct(PathComparer).ToList();
 
+            var targetImageInfo = DetectFirstImageInfoFromMedia(stage, dism);
+            var architecture = targetImageInfo.Architecture;
+            if (architecture.Equals("unknown", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Не удалось определить архитектуру целевого образа. Обработка остановлена, чтобы не подобрать языковые пакеты другой архитектуры.");
+            var targetBuild = GetBuildVersion(targetImageInfo.Version);
+            if (targetBuild is null)
+                throw new InvalidOperationException("Не удалось определить базовую версию целевого образа Windows. Обработка остановлена, чтобы не использовать несовместимые пакеты.");
+            report(7, $"Целевая Windows: {targetImageInfo.Name}; версия {targetImageInfo.Version}; сборка {targetBuild}; архитектура {architecture}.");
+
             var discoveredPackages = DiscoverRussianPackages(packageRoots, request.ExplicitCabFiles);
-            var architecture = DetectArchitectureFromMedia(stage, dism);
             var packages = FilterForArchitecture(discoveredPackages, architecture, report);
             var capabilitySources = FindCapabilitySources(packageRoots);
             var windowsPackages = packages.Where(p => !IsWinPePackage(p) && !IsLanguageFeatureSatellite(p)).Distinct(PathComparer)
@@ -163,7 +171,7 @@ internal static class ImageServicingEngine
                 throw new InvalidOperationException("Не найден основной CAB-пакет русского языка для Windows (например, Microsoft-Windows-Client-Language-Pack_x64_ru-ru.cab). Укажите подходящий Language Pack ISO или папку с пакетами ru-RU. Неподходящие пакеты автоматически не скачиваются.");
             report(8, $"Обнаружена архитектура: {architecture}. Основных CAB/FOD-кандидатов: {packages.Count}; пакетов для Windows: {windowsPackages.Length}.");
 
-            CopyRussianSetupResources(packageRoots, setupMediaRoot, stage, warnings, report);
+            CopyRussianSetupResources(packageRoots, setupMediaRoot, stage, targetImageInfo.Version, architecture, dism, warnings, report);
 
             var sources = Path.Combine(stage, "sources");
             var installWim = Path.Combine(sources, "install.wim");
@@ -634,7 +642,8 @@ internal static class ImageServicingEngine
         report(86, "Добавлен autounattend.xml только с региональными параметрами ru-RU (страницы выбора диска/учётной записи не скрываются).");
     }
 
-    private static void CopyRussianSetupResources(List<string> packageRoots, string? setupMediaRoot, string stage, List<string> warnings, Action<int, string> report)
+    private static void CopyRussianSetupResources(List<string> packageRoots, string? setupMediaRoot, string stage,
+        string targetVersion, string targetArchitecture, string dism, List<string> warnings, Action<int, string> report)
     {
         var candidateRoots = new List<string>();
         if (!string.IsNullOrWhiteSpace(setupMediaRoot)) candidateRoots.Add(setupMediaRoot);
@@ -643,12 +652,45 @@ internal static class ImageServicingEngine
         {
             var russianSources = Path.Combine(root, "sources", "ru-ru");
             if (!Directory.Exists(russianSources)) continue;
+
+            var setupImage = new[] { Path.Combine(root, "sources", "install.wim"), Path.Combine(root, "sources", "install.esd") }
+                .FirstOrDefault(File.Exists);
+            if (setupImage is not null)
+            {
+                try
+                {
+                    var info = ReadFirstImageInfo(dism, setupImage);
+                    var targetBuild = GetBuildVersion(targetVersion);
+                    var mediaBuild = GetBuildVersion(info.Version);
+                    if (targetBuild is not null && mediaBuild is not null && !targetBuild.Equals(mediaBuild, StringComparison.OrdinalIgnoreCase))
+                    {
+                        AddWarning(warnings, $"Ресурсы Setup из {root} не скопированы: база {info.Version} не совпадает с целевой Windows {targetVersion}.");
+                        continue;
+                    }
+                    if (!info.Architecture.Equals("unknown", StringComparison.OrdinalIgnoreCase) &&
+                        !info.Architecture.Equals(targetArchitecture, StringComparison.OrdinalIgnoreCase))
+                    {
+                        AddWarning(warnings, $"Ресурсы Setup из {root} не скопированы: архитектура {info.Architecture} не совпадает с целевой {targetArchitecture}.");
+                        continue;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    AddWarning(warnings, $"Не удалось проверить совместимость ресурсов Setup из {root}: {ex.Message}. Ресурсы не скопированы.");
+                    continue;
+                }
+            }
+            else
+            {
+                AddWarning(warnings, $"В источнике ресурсов Setup {root} нет install.wim/esd; его версию нельзя проверить автоматически.");
+            }
+
             var target = Path.Combine(stage, "sources", "ru-ru");
             CopyDirectory(russianSources, target);
             report(9, "Скопированы локализованные ресурсы Windows Setup: sources\\ru-ru.");
             return;
         }
-        AddWarning(warnings, "Не найден каталог sources\\ru-ru с локализованными файлами Windows Setup. Для полной локализации Setup укажите matching Russian Windows ISO/папку ресурсов.");
+        AddWarning(warnings, "Не найдены совместимые локализованные файлы Windows Setup в sources\\ru-ru. При отсутствии этих файлов часть экранов Setup может остаться английской.");
     }
 
     private static string[] DiscoverRussianPackages(IEnumerable<string> packageRoots, IEnumerable<string> explicitFiles)
@@ -796,22 +838,24 @@ internal static class ImageServicingEngine
                name.Contains("LanguageFeature-", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string DetectArchitectureFromMedia(string stage, string dism)
+    private static ImageIndexInfo DetectFirstImageInfoFromMedia(string stage, string dism)
     {
-        var candidate = new[] { Path.Combine(stage, "sources", "install.wim"), Path.Combine(stage, "sources", "install.esd") }.FirstOrDefault(File.Exists);
-        if (candidate is null) return "x64";
-        var info = Run(dism, "/English", "/Get-WimInfo", "/WimFile:" + candidate);
-        var match = Regex.Match(info.Output, @"(?im)^\s*Architecture\s*:\s*(.+)$");
-        if (!match.Success)
-        {
-            var index = Run(dism, "/English", "/Get-WimInfo", "/WimFile:" + candidate, "/Index:1");
-            match = Regex.Match(index.Output, @"(?im)^\s*Architecture\s*:\s*(.+)$");
-            if (!match.Success) return "x64";
-        }
-        var raw = match.Groups[1].Value.Trim();
-        if (raw.Contains("ARM64", StringComparison.OrdinalIgnoreCase)) return "arm64";
-        if (raw.Contains("x86", StringComparison.OrdinalIgnoreCase) || raw.Contains("x86-based", StringComparison.OrdinalIgnoreCase)) return "x86";
-        return "x64";
+        var candidate = new[] { Path.Combine(stage, "sources", "install.wim"), Path.Combine(stage, "sources", "install.esd") }
+            .FirstOrDefault(File.Exists);
+        if (candidate is null) throw new InvalidOperationException("Не найден install.wim или install.esd для определения версии/архитектуры.");
+        return ReadFirstImageInfo(dism, candidate);
+    }
+
+    private static ImageIndexInfo ReadFirstImageInfo(string dism, string imageFile)
+    {
+        var info = Run(dism, "/English", "/Get-WimInfo", "/WimFile:" + imageFile);
+        EnsureSuccess(info, "DISM не смог прочитать метаданные образа " + imageFile);
+        var index = Regex.Matches(info.Output, @"(?m)^\s*Index\s*:\s*(\d+)", RegexOptions.IgnoreCase)
+            .Select(m => int.Parse(m.Groups[1].Value)).FirstOrDefault();
+        if (index <= 0) throw new InvalidOperationException("В образе отсутствуют индексы: " + imageFile);
+        var detailed = Run(dism, "/English", "/Get-WimInfo", "/WimFile:" + imageFile, "/Index:" + index);
+        EnsureSuccess(detailed, "DISM не смог прочитать первый индекс образа " + imageFile);
+        return ParseImageInfo(index, detailed.Output);
     }
 
     private static ImageIndexInfo ParseImageInfo(int index, string output)
