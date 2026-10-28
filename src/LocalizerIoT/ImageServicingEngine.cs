@@ -33,9 +33,9 @@ internal static class ImageServicingEngine
             mountLetter = MountIso(isoPath);
             var root = mountLetter + @":\";
             var sources = Path.Combine(root, "sources");
-            var imageFile = new[] { "install.wim", "install.esd", "install.swm" }
+            var imageFile = new[] { "install.wim", "install.esd" }
                 .Select(n => Path.Combine(sources, n)).FirstOrDefault(File.Exists);
-            if (imageFile is null) throw new InvalidOperationException("В sources не найден install.wim, install.esd или install.swm. Разделённые SWM пока не поддерживаются для обслуживания.");
+            if (imageFile is null) throw new InvalidOperationException("В sources не найден install.wim или install.esd. Разделённые install.swm пока не поддерживаются для обслуживания.");
             log("Образ установки: " + imageFile);
             var info = Run(dism, "/English", "/Get-WimInfo", "/WimFile:" + imageFile);
             log(info.Output);
