@@ -107,6 +107,7 @@ internal static class ImageServicingEngine
             var packages = DiscoverRussianPackages(packageRoots, request.ExplicitCabFiles);
             var architecture = DetectArchitectureFromMedia(stage, dism);
             packages = FilterForArchitecture(packages, architecture, report);
+            var capabilitySources = FindCapabilitySources(packageRoots);
             var windowsPackages = packages.Where(p => !IsWinPePackage(p) && !IsLanguageFeatureSatellite(p)).Distinct(PathComparer)
                 .OrderByDescending(IsCoreLanguagePack).ThenBy(p => p, PathComparer).ToArray();
             if (!windowsPackages.Any(IsCoreLanguagePack))
@@ -168,7 +169,7 @@ internal static class ImageServicingEngine
                 try
                 {
                     ApplyCabPackages(dism, mountDir, windowsPackages, report, progress, 25, 40);
-                    TryAddLanguageCapabilities(dism, mountDir, packageRoots, warnings, report, progress);
+                    TryAddLanguageCapabilities(dism, mountDir, packages, capabilitySources, warnings, report, progress);
                     SetRussianDefaults(dism, mountDir, warnings, report, progress);
                     TryServiceWinRe(dism, mountDir, work, packageRoots, warnings, report, progress);
                     var langIni = Run(dism, "/Image:" + mountDir, "/Gen-LangINI", "/Distribution:" + stage);
@@ -269,15 +270,10 @@ internal static class ImageServicingEngine
         }
     }
 
-    private static void TryAddLanguageCapabilities(string dism, string mountDir, List<string> packageRoots, List<string> warnings,
+    private static void TryAddLanguageCapabilities(string dism, string mountDir, string[] packages, string[] capabilitySources, List<string> warnings,
         Action<int, string> report, int progress)
     {
-        var fodPackagesExist = packageRoots.Any(root =>
-        {
-            try { return Directory.EnumerateFiles(root, "*.cab", SearchOption.AllDirectories)
-                .Any(p => IsRussianPath(p) && p.Contains("LanguageFeatures", StringComparison.OrdinalIgnoreCase)); }
-            catch { return false; }
-        });
+        var fodPackagesExist = packages.Any(IsLanguageFeatureSatellite);
         if (!fodPackagesExist)
         {
             AddWarning(warnings, "В предоставленном источнике не обнаружены Russian Language Features on Demand; OCR/речь/рукописный ввод могут остаться на английском или отсутствовать.");
@@ -294,7 +290,7 @@ internal static class ImageServicingEngine
         };
         foreach (var cap in capabilities)
         {
-            var sources = FindCapabilitySources(packageRoots, cap);
+            var sources = capabilitySources;
             if (sources.Length == 0)
             {
                 AddWarning(warnings, $"Не найден источник FOD для {cap}.");
@@ -319,7 +315,7 @@ internal static class ImageServicingEngine
         }
     }
 
-    private static string[] FindCapabilitySources(IEnumerable<string> roots, string capability)
+    private static string[] FindCapabilitySources(IEnumerable<string> roots)
     {
         var found = new HashSet<string>(PathComparer);
         foreach (var root in roots)
@@ -418,7 +414,9 @@ internal static class ImageServicingEngine
             AddWarning(warnings, "boot.wim отсутствует; локализация Windows Setup/WinPE не выполнена.");
             return;
         }
-        var winpeRoot = FindWinPePackageRoot(packageRoots) ?? FindAdkWinPePackageRoot(architecture);
+        var winpeRoot = FindWinPePackageRoot(packageRoots);
+        if (winpeRoot is null || !HasRequiredSetupLanguagePackages(winpeRoot))
+            winpeRoot = FindAdkWinPePackageRoot(architecture) ?? winpeRoot;
         if (winpeRoot is null)
         {
             AddWarning(warnings, "Не найдены совместимые по структуре WinPE language optional components ru-RU в Language/FoD media или ADK. boot.wim оставлен без изменений.");
@@ -434,7 +432,6 @@ internal static class ImageServicingEngine
             return;
         }
 
-        Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "dummy-not-used"));
         var info = Run(dism, "/English", "/Get-WimInfo", "/WimFile:" + bootWim);
         if (info.ExitCode != 0) { AddWarning(warnings, "Не удалось прочитать boot.wim; Windows Setup останется без локализации."); return; }
         var indices = Regex.Matches(info.Output, @"(?m)^\s*Index\s*:\s*(\d+)", RegexOptions.IgnoreCase)
@@ -595,6 +592,14 @@ internal static class ImageServicingEngine
             kept.Add(package);
         }
         return kept;
+    }
+
+    private static bool HasRequiredSetupLanguagePackages(string winpeRoot)
+    {
+        var files = GetWinPeCabs(winpeRoot).Select(Path.GetFileName).ToArray();
+        return files.Any(n => n.Equals("lp.cab", StringComparison.OrdinalIgnoreCase)) &&
+            files.Any(n => n.Contains("WinPE-Setup_ru-ru", StringComparison.OrdinalIgnoreCase)) &&
+            files.Any(n => n.Contains("WinPE-Setup-Client_ru-ru", StringComparison.OrdinalIgnoreCase));
     }
 
     private static string[] GetWinPeCabs(string winpeRoot)
