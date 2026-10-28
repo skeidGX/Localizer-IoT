@@ -2,6 +2,18 @@
 
 All notable changes to Localizer-IoT are documented here.
 
+## [0.1.0-alpha.2] — 2026-10-28
+
+### Fixed
+- Made UUP build parsing tolerant of both abbreviated build strings (for example `26100.9711`) and full OS version strings (for example `10.0.26100.9711`).
+- Added verified-by-live-API fallback candidate records for Windows 11 24H2 / IoT Enterprise LTSC 2024 x64 (base build 26100) when UUP Dump search returns no matching rows.
+- Reordered candidate selection to prefer the shared `.1` language-package baseline, then newer candidates, while continuing to exclude cumulative OS update payloads.
+- Updated the release workflow to accept versioned tags from commit messages, so subsequent preview releases can be published without overwriting the first tag.
+
+### Notes
+- Fallback UUP entries are only discovery seeds: the app still checks language availability and fetches file metadata live from UUP Dump before downloading.
+- This alpha remains best-effort. The new fallback was not verified end-to-end against the user's ISO or a VM boot test.
+
 ## [0.1.0-alpha.1] — 2026-10-28
 
 ### Added
