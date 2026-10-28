@@ -14,6 +14,7 @@ public sealed class MainForm : Form
     private readonly NumericUpDown _index = new() { Minimum = 1, Maximum = 999, Value = 1, Width = 82 };
     private readonly CheckBox _allIndexes = new() { Text = "Обработать все редакции", Checked = true, AutoSize = true };
     private readonly Button _inspect = new() { Text = "Проверить ISO", AutoSize = true };
+    private readonly Button _autoDownload = new() { Text = "Автоматически скачать RU", AutoSize = true };
     private readonly Button _browseCab = new() { Text = "Добавить CAB…", AutoSize = true };
     private readonly Button _run = new() { Text = "Создать русифицированный ISO", AutoSize = true };
     private readonly ProgressBar _progress = new() { Width = 240, Minimum = 0, Maximum = 100 };
@@ -60,13 +61,14 @@ public sealed class MainForm : Form
             }
         };
         _inspect.Click += async (_, _) => await InspectIsoAsync();
+        _autoDownload.Click += async (_, _) => await AutoDownloadRussianPackagesAsync();
         _browseCab.Click += (_, _) => SelectCabFiles();
         _run.Click += async (_, _) => await RunLocalizationAsync();
 
         Log("Localizer-IoT: исходный ISO копируется во временную папку и не изменяется.");
         Log("Укажите отдельно Language Pack ISO и Languages and Optional Features ISO, если в поставке это разные носители.");
         Log("Все языковые и FOD источники должны соответствовать версии, базовой сборке и архитектуре целевого образа.");
-        Log("Автоматическая загрузка лицензируемых Language Pack/FoD ISO не включена: программа ищет совместимые CAB в предоставленном источнике и ADK.");
+        Log("Автоподбор RU использует UUP Dump JSON API и проверяет целостность файлов. Автоматическая доступность FOD и Setup/WinPE зависит от выпуска Windows.");
     }
 
     private void BuildLayout()
@@ -188,6 +190,7 @@ public sealed class MainForm : Form
         options.Controls.Add(new Label { Text = "Индекс (если отключены все редакции):", AutoSize = true, Padding = new Padding(8, 5, 0, 0) });
         options.Controls.Add(_index);
         options.Controls.Add(_inspect);
+        options.Controls.Add(_autoDownload);
         options.Controls.Add(new Label { Text = "Выходной ISO:", AutoSize = true, Padding = new Padding(8, 5, 0, 0) });
         _output.Width = 250;
         _output.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Windows-IoT-LTSC-ru.iso");
@@ -289,6 +292,33 @@ public sealed class MainForm : Form
         finally { SetBusy(false); }
     }
 
+    private async Task AutoDownloadRussianPackagesAsync()
+    {
+        if (!ValidateIso()) return;
+        SetBusy(true);
+        _progress.Value = 0;
+        try
+        {
+            var result = await UupLanguagePackDownloader.DownloadRussianPackagesAsync(
+                _iso.Text.Trim(), Log, p => Ui(() => _progress.Value = Math.Clamp(p, 0, 100)));
+            _packageSource.Text = result.Directory;
+            _fodSource.Text = result.Directory;
+            Log($"Автоподбор завершён: база {result.LanguagePackBaseBuild}; подготовлено CAB: {result.PackagesReady}; языковых FOD CAB: {result.FeaturePackagesReady}.");
+            MessageBox.Show(this,
+                $"Русский Language Pack автоматически подготовлен.\n\n" +
+                $"Совместимая база: {result.LanguagePackBaseBuild}\nАрхитектура: {result.Architecture}\n" +
+                $"CAB всего: {result.PackagesReady}\nCAB языковых функций: {result.FeaturePackagesReady}\n\n" +
+                "Источники заполнены автоматически. Полная русификация экранов Setup/WinPE зависит от наличия соответствующих ресурсов; результат будет указан в отчёте.",
+                "Компоненты ru-RU подготовлены", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            Log("Автоматическая загрузка RU не завершена: " + ex.Message);
+            MessageBox.Show(this, ex.Message, "Не удалось автоматически скачать русский язык", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        finally { SetBusy(false); }
+    }
+
     private async Task RunLocalizationAsync()
     {
         if (!ValidateIso()) return;
@@ -321,6 +351,32 @@ public sealed class MainForm : Form
         if (File.Exists(output) && MessageBox.Show(this, "Выходной ISO уже существует. Перезаписать?", "Подтверждение",
             MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
 
+        var cabFiles = _packages.Text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => s.Trim()).Where(File.Exists).ToArray();
+        if (string.IsNullOrWhiteSpace(_packageSource.Text) && cabFiles.Length == 0)
+        {
+            SetBusy(true);
+            _progress.Value = 0;
+            try
+            {
+                Log("Источник Language Pack не задан — запускаю автоматический поиск и скачивание ru-RU.");
+                var result = await UupLanguagePackDownloader.DownloadRussianPackagesAsync(
+                    _iso.Text.Trim(), Log, p => Ui(() => _progress.Value = Math.Clamp(p, 0, 100)));
+                _packageSource.Text = result.Directory;
+                if (string.IsNullOrWhiteSpace(_fodSource.Text)) _fodSource.Text = result.Directory;
+                cabFiles = _packages.Text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(s => s.Trim()).Where(File.Exists).ToArray();
+                Log($"Автоматически подготовлено CAB: {result.PackagesReady}; FOD CAB: {result.FeaturePackagesReady}.");
+            }
+            catch (Exception ex)
+            {
+                Log("Автозагрузка ru-RU не удалась: " + ex.Message);
+                MessageBox.Show(this, ex.Message, "Не удалось скачать языковой пакет", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            finally { SetBusy(false); }
+        }
+
         if (ImageServicingEngine.FindOscdimgPath() is null)
         {
             var choice = MessageBox.Show(this,
@@ -349,7 +405,7 @@ public sealed class MainForm : Form
             }
         }
 
-        var cabFiles = _packages.Text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+        cabFiles = _packages.Text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
             .Select(s => s.Trim()).Where(File.Exists).ToArray();
         var request = new LocalizationRequest(
             Path.GetFullPath(_iso.Text.Trim()),
@@ -403,7 +459,7 @@ public sealed class MainForm : Form
     private void SetBusy(bool busy)
     {
         _busy = busy;
-        _inspect.Enabled = _browseCab.Enabled = _run.Enabled = !busy;
+        _inspect.Enabled = _autoDownload.Enabled = _browseCab.Enabled = _run.Enabled = !busy;
         Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
     }
 
