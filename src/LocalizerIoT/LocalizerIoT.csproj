@@ -6,10 +6,10 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Localizer-IoT</AssemblyName>
-    <Version>0.9.0.0</Version>
-    <AssemblyVersion>0.9.0.0</AssemblyVersion>
-    <FileVersion>0.9.0.0</FileVersion>
-    <InformationalVersion>Alpha 0.9.0.0</InformationalVersion>
+    <Version>0.9.0.1</Version>
+    <AssemblyVersion>0.9.0.1</AssemblyVersion>
+    <FileVersion>0.9.0.1</FileVersion>
+    <InformationalVersion>Alpha 0.9.0.1</InformationalVersion>
     <RootNamespace>LocalizerIoT</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
