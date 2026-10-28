@@ -1,0 +1,833 @@
+using System.Diagnostics;
+using System.Security.Principal;
+using System.Text;
+using System.Text.RegularExpressions;
+
+namespace LocalizerIoT;
+
+internal sealed record ImageIndexInfo(int Index, string Name, string Architecture, string Version);
+
+internal sealed record LocalizationRequest(
+    string SourceIso,
+    string? PackageSource,
+    string[] ExplicitCabFiles,
+    string OutputIso,
+    bool AllIndexes,
+    int SelectedIndex);
+
+internal static class ImageServicingEngine
+{
+    private sealed record ProcResult(int ExitCode, string Output);
+    private static readonly StringComparer PathComparer = StringComparer.OrdinalIgnoreCase;
+
+    public static IReadOnlyList<ImageIndexInfo> InspectIso(string isoPath, Action<string> log)
+    {
+        if (!File.Exists(isoPath)) throw new FileNotFoundException("ISO-файл не найден.", isoPath);
+        var dism = FindDism() ?? throw new InvalidOperationException("DISM.exe не найден. Запустите программу в Windows 10/11.");
+        string? mountLetter = null;
+        try
+        {
+            log("Подключаю ISO для чтения структуры…");
+            mountLetter = MountIso(isoPath);
+            var root = mountLetter + @":\";
+            var sources = Path.Combine(root, "sources");
+            var imageFile = new[] { "install.wim", "install.esd", "install.swm" }
+                .Select(n => Path.Combine(sources, n)).FirstOrDefault(File.Exists);
+            if (imageFile is null) throw new InvalidOperationException("В sources не найден install.wim, install.esd или install.swm. Разделённые SWM пока не поддерживаются для обслуживания.");
+            log("Образ установки: " + imageFile);
+            var info = Run(dism, "/English", "/Get-WimInfo", "/WimFile:" + imageFile);
+            log(info.Output);
+            EnsureSuccess(info, "Не удалось прочитать список редакций в образе установки.");
+            var indices = Regex.Matches(info.Output, @"(?m)^\s*Index\s*:\s*(\d+)", RegexOptions.IgnoreCase)
+                .Select(m => int.Parse(m.Groups[1].Value)).Distinct().OrderBy(i => i).ToArray();
+            var found = new List<ImageIndexInfo>();
+            foreach (var index in indices)
+            {
+                var one = Run(dism, "/English", "/Get-WimInfo", "/WimFile:" + imageFile, "/Index:" + index);
+                if (one.ExitCode != 0) continue;
+                found.Add(ParseImageInfo(index, one.Output));
+            }
+            if (found.Count == 0) throw new InvalidOperationException("DISM не обнаружил ни одного индекса редакции.");
+            return found;
+        }
+        finally
+        {
+            if (mountLetter is not null) TryDismountIso(isoPath);
+        }
+    }
+
+    public static void Run(LocalizationRequest request, Action<int, string> report)
+    {
+        var warnings = new List<string>();
+        var dism = FindDism() ?? throw new InvalidOperationException("DISM.exe не найден.");
+        var oscdimg = FindOscdimg() ?? throw new InvalidOperationException("oscdimg.exe не найден. Установите Windows ADK → Deployment Tools.");
+        var sourceIso = Path.GetFullPath(request.SourceIso);
+        var outputIso = Path.GetFullPath(request.OutputIso);
+        if (!File.Exists(sourceIso)) throw new FileNotFoundException("Исходный ISO не найден.", sourceIso);
+        if (PathComparer.Equals(sourceIso, outputIso))
+            throw new InvalidOperationException("Выходной ISO не может совпадать с исходным файлом.");
+        if (!IsAdministrator()) throw new InvalidOperationException("Для обслуживания образов запустите программу от имени администратора.");
+        Directory.CreateDirectory(Path.GetDirectoryName(outputIso)!);
+
+        var work = Path.Combine(Path.GetTempPath(), "LocalizerIoT-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(work);
+        string? targetIsoLetter = null;
+        string? packageIsoLetter = null;
+        string? packageRoot = null;
+        var mountDir = Path.Combine(work, "mount");
+        var currentMount = false;
+
+        try
+        {
+            report(2, "Проверяю исходный образ и источники языковых компонентов…");
+            targetIsoLetter = MountIso(sourceIso);
+            var sourceRoot = targetIsoLetter + @":\";
+            var stage = Path.Combine(work, "distribution");
+            report(5, "Копирую ISO в отдельную рабочую папку. Исходный файл не изменяется…");
+            CopyDirectory(sourceRoot, stage);
+            TryDismountIso(sourceIso);
+            targetIsoLetter = null;
+
+            var packageRoots = new List<string>();
+            if (!string.IsNullOrWhiteSpace(request.PackageSource))
+            {
+                var p = request.PackageSource.Trim();
+                if (Directory.Exists(p)) packageRoots.Add(Path.GetFullPath(p));
+                else if (File.Exists(p) && Path.GetExtension(p).Equals(".iso", StringComparison.OrdinalIgnoreCase))
+                {
+                    packageIsoLetter = MountIso(Path.GetFullPath(p));
+                    packageRoot = packageIsoLetter + @":\";
+                    packageRoots.Add(packageRoot);
+                }
+                else throw new InvalidOperationException("Источник языковых пакетов должен быть существующей папкой или ISO-файлом.");
+            }
+            packageRoots.AddRange(request.ExplicitCabFiles.Where(File.Exists).Select(Path.GetDirectoryName).Where(p => p is not null).Cast<string>());
+            packageRoots = packageRoots.Distinct(PathComparer).ToList();
+
+            var packages = DiscoverRussianPackages(packageRoots, request.ExplicitCabFiles);
+            var architecture = DetectArchitectureFromMedia(stage, dism);
+            packages = FilterForArchitecture(packages, architecture, report);
+            var windowsPackages = packages.Where(p => !IsWinPePackage(p) && !IsLanguageFeatureSatellite(p)).Distinct(PathComparer)
+                .OrderByDescending(IsCoreLanguagePack).ThenBy(p => p, PathComparer).ToArray();
+            if (!windowsPackages.Any(IsCoreLanguagePack))
+                throw new InvalidOperationException("Не найден основной CAB-пакет русского языка для Windows (например, Microsoft-Windows-Client-Language-Pack_x64_ru-ru.cab). Укажите подходящий Language Pack ISO или папку с пакетами ru-RU. Неподходящие пакеты автоматически не скачиваются.");
+            report(8, $"Обнаружена архитектура: {architecture}. Основных CAB/FOD-кандидатов: {packages.Count}; пакетов для Windows: {windowsPackages.Length}.");
+
+            CopyRussianSetupResources(packageRoots, stage, warnings, report);
+
+            var sources = Path.Combine(stage, "sources");
+            var installWim = Path.Combine(sources, "install.wim");
+            var installEsd = Path.Combine(sources, "install.esd");
+            if (!File.Exists(installWim) && !File.Exists(installEsd))
+                throw new InvalidOperationException("После копирования не найден sources\\install.wim или sources\\install.esd.");
+
+            var installIndices = new List<int>();
+            if (File.Exists(installEsd))
+            {
+                var esdInfo = Run(dism, "/English", "/Get-WimInfo", "/WimFile:" + installEsd);
+                EnsureSuccess(esdInfo, "Не удалось прочитать install.esd.");
+                var sourceIndexes = Regex.Matches(esdInfo.Output, @"(?m)^\s*Index\s*:\s*(\d+)", RegexOptions.IgnoreCase)
+                    .Select(m => int.Parse(m.Groups[1].Value)).Distinct().OrderBy(i => i).ToArray();
+                var selected = request.AllIndexes ? sourceIndexes : sourceIndexes.Where(i => i == request.SelectedIndex).ToArray();
+                if (selected.Length == 0) throw new InvalidOperationException($"Индекс {request.SelectedIndex} отсутствует в install.esd.");
+                if (File.Exists(installWim)) File.Delete(installWim);
+                for (var n = 0; n < selected.Length; n++)
+                {
+                    report(10 + n * 5 / Math.Max(1, selected.Length), $"Экспортирую редакцию {selected[n]} из ESD в WIM ({n + 1}/{selected.Length})…");
+                    var dest = Run(dism, "/Export-Image", "/SourceImageFile:" + installEsd, "/SourceIndex:" + selected[n],
+                        "/DestinationImageFile:" + installWim, "/Compress:max", "/CheckIntegrity");
+                    EnsureSuccess(dest, $"Не удалось экспортировать индекс {selected[n]} из install.esd.");
+                    installIndices.Add(n + 1);
+                }
+                File.Delete(installEsd);
+                report(15, $"ESD преобразован. В итоговом install.wim будет редакций: {installIndices.Count}.");
+            }
+            else
+            {
+                var wimInfo = Run(dism, "/English", "/Get-WimInfo", "/WimFile:" + installWim);
+                EnsureSuccess(wimInfo, "Не удалось прочитать install.wim.");
+                var all = Regex.Matches(wimInfo.Output, @"(?m)^\s*Index\s*:\s*(\d+)", RegexOptions.IgnoreCase)
+                    .Select(m => int.Parse(m.Groups[1].Value)).Distinct().OrderBy(i => i).ToArray();
+                installIndices.AddRange(request.AllIndexes ? all : all.Where(i => i == request.SelectedIndex));
+                if (installIndices.Count == 0) throw new InvalidOperationException($"Индекс {request.SelectedIndex} отсутствует в install.wim.");
+            }
+
+            Directory.CreateDirectory(mountDir);
+            for (var i = 0; i < installIndices.Count; i++)
+            {
+                var index = installIndices[i];
+                var progress = 18 + (int)(48.0 * i / Math.Max(1, installIndices.Count));
+                report(progress, $"Обслуживаю install.wim, индекс {index} ({i + 1}/{installIndices.Count})…");
+                var imageInfoResult = Run(dism, "/English", "/Get-WimInfo", "/WimFile:" + installWim, "/Index:" + index);
+                EnsureSuccess(imageInfoResult, $"Не удалось прочитать install.wim индекс {index}.");
+                var imageInfo = ParseImageInfo(index, imageInfoResult.Output);
+                report(progress, $"Редакция {index}: {imageInfo.Name}; версия {imageInfo.Version}; архитектура {imageInfo.Architecture}.");
+                var mount = Run(dism, "/Mount-Image", "/ImageFile:" + installWim, "/Index:" + index, "/MountDir:" + mountDir, "/CheckIntegrity");
+                EnsureSuccess(mount, $"Не удалось смонтировать install.wim индекс {index}.");
+                currentMount = true;
+                try
+                {
+                    ApplyCabPackages(dism, mountDir, windowsPackages, report, progress, 25, 40);
+                    TryAddLanguageCapabilities(dism, mountDir, packageRoots, warnings, report, progress);
+                    SetRussianDefaults(dism, mountDir, warnings, report, progress);
+                    TryServiceWinRe(dism, mountDir, work, packageRoots, warnings, report, progress);
+                    var langIni = Run(dism, "/Image:" + mountDir, "/Gen-LangINI", "/Distribution:" + stage);
+                    if (langIni.ExitCode != 0) AddWarning(warnings, "DISM /Gen-LangINI не сработал: " + ShortOutput(langIni.Output));
+                    var unmount = Run(dism, "/Unmount-Image", "/MountDir:" + mountDir, "/Commit", "/CheckIntegrity");
+                    EnsureSuccess(unmount, $"Не удалось сохранить install.wim индекс {index}.");
+                    currentMount = false;
+                }
+                catch
+                {
+                    if (currentMount)
+                    {
+                        Run(dism, "/Unmount-Image", "/MountDir:" + mountDir, "/Discard");
+                        currentMount = false;
+                    }
+                    throw;
+                }
+            }
+
+            CreateAutounattendIfMissing(stage, architecture, warnings, report);
+            ServiceBootWimIfPossible(dism, stage, architecture, packageRoots, warnings, report);
+            report(88, "Готовлю список языков установки и проверяю выходные файлы…");
+            var langIniPath = Path.Combine(sources, "lang.ini");
+            if (!File.Exists(langIniPath))
+            {
+                File.WriteAllText(langIniPath,
+                    "[Available UI Languages]\r\nen-US = 3\r\nru-RU = 0\r\n\r\n[Fallback Languages]\r\nen-US = en-us\r\n",
+                    new UTF8Encoding(false));
+                AddWarning(warnings, "DISM не сгенерировал lang.ini; записан базовый список языков. Проверьте этот файл для конкретного образа.");
+            }
+            ServiceLangIniForBoot(dism, stage, architecture, warnings);
+
+            report(93, "Создаю загрузочный ISO…");
+            var bios = Path.Combine(stage, "boot", "etfsboot.com");
+            var efiCandidates = new[]
+            {
+                Path.Combine(stage, "efi", "microsoft", "boot", "efisys.bin"),
+                Path.Combine(stage, "efi", "microsoft", "boot", "efisys_noprompt.bin")
+            };
+            var efi = efiCandidates.FirstOrDefault(File.Exists);
+            var bootArgs = new List<string> { "-m", "-o", "-u2", "-udfver102", "-lWIN_IOT_RU" };
+            var bootData = File.Exists(bios) && efi is not null
+                ? "-bootdata:2#p0,e,b" + bios + "#pEF,e,b" + efi
+                : File.Exists(bios) ? "-b" + bios
+                : throw new InvalidOperationException("Не найден boot\\etfsboot.com; невозможно создать BIOS-загрузочный ISO.");
+            bootArgs.Add(bootData);
+            var bootOrder = CreateBootOrderFile(stage, work);
+            if (bootOrder is not null) bootArgs.Add("-yo" + bootOrder);
+            bootArgs.Add(stage);
+            bootArgs.Add(outputIso);
+            var isoBuild = Run(oscdimg, bootArgs.ToArray());
+            if (isoBuild.ExitCode != 0) throw new InvalidOperationException("oscdimg не смог создать ISO:\r\n" + isoBuild.Output);
+
+            var reportText = new StringBuilder();
+            reportText.AppendLine("Localizer-IoT report");
+            reportText.AppendLine("Source ISO: " + sourceIso);
+            reportText.AppendLine("Output ISO: " + outputIso);
+            reportText.AppendLine("Architecture: " + architecture);
+            reportText.AppendLine("Image indexes serviced: " + string.Join(", ", installIndices));
+            reportText.AppendLine("Language packages:");
+            foreach (var package in windowsPackages) reportText.AppendLine("  " + package);
+            reportText.AppendLine("Warnings / incomplete localization:");
+            foreach (var warning in warnings) reportText.AppendLine("  - " + warning);
+            reportText.AppendLine("Important: boot/WinRE servicing may be partial depending on the availability and matching version of WinPE language optional components.");
+            File.WriteAllText(outputIso + ".report.txt", reportText.ToString(), new UTF8Encoding(false));
+
+            report(100, warnings.Count == 0
+                ? "ISO создан. Итоговый отчёт сохранён рядом с ISO."
+                : $"ISO создан с {warnings.Count} предупреждением(ями). Проверьте отчёт рядом с ISO.");
+        }
+        finally
+        {
+            if (currentMount)
+            {
+                try { Run(dism, "/Unmount-Image", "/MountDir:" + mountDir, "/Discard"); } catch { }
+            }
+            if (targetIsoLetter is not null) TryDismountIso(sourceIso);
+            if (packageIsoLetter is not null && !string.IsNullOrWhiteSpace(request.PackageSource))
+                TryDismountIso(Path.GetFullPath(request.PackageSource));
+            try { Run(dism, "/Cleanup-Wim"); } catch { }
+            try { Directory.Delete(work, true); } catch { }
+        }
+    }
+
+    private static void ApplyCabPackages(string dism, string mountDir, string[] packages, Action<int, string> report,
+        int baseProgress, int range, int offset)
+    {
+        var apply = packages.Where(p => !IsLanguageFeatureSatellite(p)).ToArray();
+        if (apply.Length == 0) throw new InvalidOperationException("Не найдено применимых CAB-пакетов русского языка.");
+        for (var i = 0; i < apply.Length; i++)
+        {
+            var package = apply[i];
+            var p = Math.Clamp(baseProgress + offset + (int)(range * (double)i / apply.Length), 0, 96);
+            report(p, $"Добавляю языковой пакет {i + 1}/{apply.Length}: {Path.GetFileName(package)}");
+            var add = Run(dism, "/Image:" + mountDir, "/Add-Package", "/PackagePath:" + package);
+            if (add.ExitCode != 0)
+                throw new InvalidOperationException($"DISM не смог добавить пакет {Path.GetFileName(package)}. Возможны несовпадение версии/архитектуры или отсутствие зависимости.\r\n{ShortOutput(add.Output)}");
+        }
+    }
+
+    private static void TryAddLanguageCapabilities(string dism, string mountDir, List<string> packageRoots, List<string> warnings,
+        Action<int, string> report, int progress)
+    {
+        var fodPackagesExist = packageRoots.Any(root =>
+        {
+            try { return Directory.EnumerateFiles(root, "*.cab", SearchOption.AllDirectories)
+                .Any(p => IsRussianPath(p) && p.Contains("LanguageFeatures", StringComparison.OrdinalIgnoreCase)); }
+            catch { return false; }
+        });
+        if (!fodPackagesExist)
+        {
+            AddWarning(warnings, "В предоставленном источнике не обнаружены Russian Language Features on Demand; OCR/речь/рукописный ввод могут остаться на английском или отсутствовать.");
+            return;
+        }
+
+        var capabilities = new[]
+        {
+            "Language.Basic~~~ru-RU~0.0.1.0",
+            "Language.OCR~~~ru-RU~0.0.1.0",
+            "Language.TextToSpeech~~~ru-RU~0.0.1.0",
+            "Language.Speech~~~ru-RU~0.0.1.0",
+            "Language.Handwriting~~~ru-RU~0.0.1.0"
+        };
+        foreach (var cap in capabilities)
+        {
+            var sources = FindCapabilitySources(packageRoots, cap);
+            if (sources.Length == 0)
+            {
+                AddWarning(warnings, $"Не найден источник FOD для {cap}.");
+                continue;
+            }
+            var done = false;
+            foreach (var source in sources)
+            {
+                var result = Run(dism, "/Image:" + mountDir, "/Add-Capability", "/CapabilityName:" + cap,
+                    "/Source:" + source, "/LimitAccess");
+                if (result.ExitCode == 0 || result.Output.Contains("already installed", StringComparison.OrdinalIgnoreCase))
+                {
+                    report(progress + 2, $"Компонент языка добавлен/уже установлен: {cap}");
+                    done = true;
+                    break;
+                }
+                if (!result.Output.Contains("0x800f081f", StringComparison.OrdinalIgnoreCase) &&
+                    !result.Output.Contains("source files could not be found", StringComparison.OrdinalIgnoreCase))
+                    AddWarning(warnings, $"DISM не смог добавить FOD {cap}: {ShortOutput(result.Output)}");
+            }
+            if (!done) AddWarning(warnings, $"FOD {cap} не установлен: отсутствует совместимый источник или компонент не поддерживается данным выпуском.");
+        }
+    }
+
+    private static string[] FindCapabilitySources(IEnumerable<string> roots, string capability)
+    {
+        var found = new HashSet<string>(PathComparer);
+        foreach (var root in roots)
+        {
+            if (!Directory.Exists(root)) continue;
+            found.Add(root);
+            foreach (var dirName in new[] { "LanguagesAndOptionalFeatures", "Languages and Optional Features", "FeaturesOnDemand", "FOD", "FoD" })
+            {
+                try
+                {
+                    foreach (var dir in Directory.EnumerateDirectories(root, dirName, SearchOption.AllDirectories).Take(10))
+                        found.Add(dir);
+                }
+                catch { }
+            }
+        }
+        return found.ToArray();
+    }
+
+    private static void SetRussianDefaults(string dism, string mountDir, List<string> warnings, Action<int, string> report, int progress)
+    {
+        report(progress + 3, "Настраиваю язык интерфейса, регион и клавиатуру ru-RU…");
+        TryIntl(dism, mountDir, "/Set-AllIntl:ru-RU", warnings);
+        TryIntl(dism, mountDir, "/Set-UILang:ru-RU", warnings);
+        TryIntl(dism, mountDir, "/Set-SysLocale:ru-RU", warnings);
+        TryIntl(dism, mountDir, "/Set-UserLocale:ru-RU", warnings);
+        TryIntl(dism, mountDir, "/Set-InputLocale:0419:00000419", warnings);
+        TryIntl(dism, mountDir, "/Set-TimeZone:Russian Standard Time", warnings);
+    }
+
+    private static void TryIntl(string dism, string mountDir, string setting, List<string> warnings)
+    {
+        var r = Run(dism, "/Image:" + mountDir, setting);
+        if (r.ExitCode != 0) AddWarning(warnings, $"Не удалось применить {setting}: {ShortOutput(r.Output)}");
+    }
+
+    private static void TryServiceWinRe(string dism, string windowsMount, string work, List<string> packageRoots,
+        List<string> warnings, Action<int, string> report, int progress)
+    {
+        var winre = Path.Combine(windowsMount, "Windows", "System32", "Recovery", "winre.wim");
+        if (!File.Exists(winre))
+        {
+            report(progress + 5, "WinRE не найден внутри этого индекса; пропускаю встроенную среду восстановления.");
+            return;
+        }
+        var winpeRoot = FindWinPePackageRoot(packageRoots);
+        if (winpeRoot is null)
+        {
+            AddWarning(warnings, "WinRE найден, но WinPE language optional components ru-RU отсутствуют в выбранном Language/FoD media; WinRE не локализован.");
+            return;
+        }
+        var winreCopy = Path.Combine(work, "winre-copy-" + Guid.NewGuid().ToString("N") + ".wim");
+        var winreMount = Path.Combine(work, "winre-mount-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(winreMount);
+        var isMounted = false;
+        try
+        {
+            File.Copy(winre, winreCopy, true);
+            var mount = Run(dism, "/Mount-Image", "/ImageFile:" + winreCopy, "/Index:1", "/MountDir:" + winreMount, "/CheckIntegrity");
+            if (mount.ExitCode != 0) throw new InvalidOperationException(ShortOutput(mount.Output));
+            isMounted = true;
+            var candidates = GetWinPeCabs(winpeRoot).Where(p => Path.GetFileName(p).Equals("lp.cab", StringComparison.OrdinalIgnoreCase) ||
+                Path.GetFileName(p).StartsWith("WinPE-", StringComparison.OrdinalIgnoreCase)).ToArray();
+            foreach (var cab in candidates)
+            {
+                var add = Run(dism, "/Image:" + winreMount, "/Add-Package", "/PackagePath:" + cab);
+                if (add.ExitCode != 0) AddWarning(warnings, $"WinRE пропустил {Path.GetFileName(cab)}: {ShortOutput(add.Output)}");
+            }
+            var intl = Run(dism, "/Image:" + winreMount, "/Set-AllIntl:ru-RU");
+            if (intl.ExitCode != 0) AddWarning(warnings, "Не удалось настроить locale ru-RU в WinRE: " + ShortOutput(intl.Output));
+            var commit = Run(dism, "/Unmount-Image", "/MountDir:" + winreMount, "/Commit", "/CheckIntegrity");
+            EnsureSuccess(commit, "Не удалось зафиксировать локализацию WinRE.");
+            isMounted = false;
+            File.Copy(winreCopy, winre, true);
+            report(progress + 6, "WinRE обработан (по применимости доступных WinPE OCs).");
+        }
+        catch (Exception ex)
+        {
+            AddWarning(warnings, "WinRE остался без гарантированной полной локализации: " + ex.Message);
+            if (isMounted) { Run(dism, "/Unmount-Image", "/MountDir:" + winreMount, "/Discard"); isMounted = false; }
+        }
+        finally
+        {
+            if (isMounted) { try { Run(dism, "/Unmount-Image", "/MountDir:" + winreMount, "/Discard"); } catch { } }
+            try { Directory.Delete(winreMount, true); } catch { }
+            try { if (File.Exists(winreCopy)) File.Delete(winreCopy); } catch { }
+        }
+    }
+
+    private static void ServiceBootWimIfPossible(string dism, string stage, string architecture, List<string> packageRoots,
+        List<string> warnings, Action<int, string> report)
+    {
+        var bootWim = Path.Combine(stage, "sources", "boot.wim");
+        if (!File.Exists(bootWim))
+        {
+            AddWarning(warnings, "boot.wim отсутствует; локализация Windows Setup/WinPE не выполнена.");
+            return;
+        }
+        var winpeRoot = FindWinPePackageRoot(packageRoots) ?? FindAdkWinPePackageRoot(architecture);
+        if (winpeRoot is null)
+        {
+            AddWarning(warnings, "Не найдены совместимые по структуре WinPE language optional components ru-RU в Language/FoD media или ADK. boot.wim оставлен без изменений.");
+            return;
+        }
+        var winpePackages = GetWinPeCabs(winpeRoot);
+        var lp = winpePackages.FirstOrDefault(p => Path.GetFileName(p).Equals("lp.cab", StringComparison.OrdinalIgnoreCase));
+        var setup = winpePackages.FirstOrDefault(p => Path.GetFileName(p).Contains("WinPE-Setup_ru-ru", StringComparison.OrdinalIgnoreCase));
+        var setupClient = winpePackages.FirstOrDefault(p => Path.GetFileName(p).Contains("WinPE-Setup-Client_ru-ru", StringComparison.OrdinalIgnoreCase));
+        if (lp is null || setup is null || setupClient is null)
+        {
+            AddWarning(warnings, "Для Windows Setup нужны lp.cab, WinPE-Setup_ru-ru.cab и WinPE-Setup-Client_ru-ru.cab из совместимого ADK/WinPE language media; boot.wim оставлен без изменений.");
+            return;
+        }
+
+        Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "dummy-not-used"));
+        var info = Run(dism, "/English", "/Get-WimInfo", "/WimFile:" + bootWim);
+        if (info.ExitCode != 0) { AddWarning(warnings, "Не удалось прочитать boot.wim; Windows Setup останется без локализации."); return; }
+        var indices = Regex.Matches(info.Output, @"(?m)^\s*Index\s*:\s*(\d+)", RegexOptions.IgnoreCase)
+            .Select(m => int.Parse(m.Groups[1].Value)).Distinct().OrderBy(i => i).ToArray();
+        var mountDir = Path.Combine(Path.GetTempPath(), "LocalizerIoT-boot-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(mountDir);
+        var failed = false;
+        for (var pos = 0; pos < indices.Length; pos++)
+        {
+            var index = indices[pos];
+            var mount = Run(dism, "/Mount-Image", "/ImageFile:" + bootWim, "/Index:" + index, "/MountDir:" + mountDir, "/CheckIntegrity");
+            if (mount.ExitCode != 0) { AddWarning(warnings, $"Не удалось смонтировать boot.wim index {index}: {ShortOutput(mount.Output)}"); failed = true; break; }
+            var mounted = true;
+            try
+            {
+                var setupIndex = index == 2;
+                var required = setupIndex ? new[] { lp, setup, setupClient } : new[] { lp };
+                foreach (var cab in required)
+                {
+                    var add = Run(dism, "/Image:" + mountDir, "/Add-Package", "/PackagePath:" + cab);
+                    if (add.ExitCode != 0)
+                        throw new InvalidOperationException($"Не применён обязательный WinPE пакет {Path.GetFileName(cab)}: {ShortOutput(add.Output)}");
+                }
+                foreach (var cab in winpePackages.Where(p => Path.GetFileName(p).StartsWith("WinPE-", StringComparison.OrdinalIgnoreCase) &&
+                    !Path.GetFileName(p).Contains("WinPE-Setup_ru-ru", StringComparison.OrdinalIgnoreCase) &&
+                    !Path.GetFileName(p).Contains("WinPE-Setup-Client_ru-ru", StringComparison.OrdinalIgnoreCase)))
+                {
+                    var add = Run(dism, "/Image:" + mountDir, "/Add-Package", "/PackagePath:" + cab);
+                    if (add.ExitCode != 0) AddWarning(warnings, $"WinPE index {index}: необязательный {Path.GetFileName(cab)} не добавлен: {ShortOutput(add.Output)}");
+                }
+                var intl = Run(dism, "/Image:" + mountDir, "/Set-AllIntl:ru-RU");
+                if (intl.ExitCode != 0) AddWarning(warnings, "Не удалось установить locale ru-RU в boot.wim: " + ShortOutput(intl.Output));
+                if (setupIndex)
+                {
+                    var setUi = Run(dism, "/Image:" + mountDir, "/Set-SetupUILang:ru-RU", "/Distribution:" + stage);
+                    if (setUi.ExitCode != 0) AddWarning(warnings, "Не удалось установить язык Windows Setup: " + ShortOutput(setUi.Output));
+                    var generatedLangIni = Path.Combine(stage, "sources", "lang.ini");
+                    if (File.Exists(generatedLangIni))
+                    {
+                        var toBoot = Path.Combine(mountDir, "sources", "lang.ini");
+                        Directory.CreateDirectory(Path.GetDirectoryName(toBoot)!);
+                        File.Copy(generatedLangIni, toBoot, true);
+                    }
+                }
+                var unmount = Run(dism, "/Unmount-Image", "/MountDir:" + mountDir, "/Commit", "/CheckIntegrity");
+                EnsureSuccess(unmount, $"Не удалось сохранить boot.wim index {index}.");
+                mounted = false;
+                report(80 + (int)(5.0 * (pos + 1) / Math.Max(1, indices.Length)), $"Сохранён boot.wim index {index}.");
+            }
+            catch (Exception ex)
+            {
+                if (mounted) Run(dism, "/Unmount-Image", "/MountDir:" + mountDir, "/Discard");
+                failed = true;
+                AddWarning(warnings, $"boot.wim index {index} оставлен без изменений из-за несовместимого WinPE пакета: {ex.Message}");
+                break;
+            }
+        }
+        try { Run(dism, "/Cleanup-Wim"); } catch { }
+        try { Directory.Delete(mountDir, true); } catch { }
+        if (failed) AddWarning(warnings, "Локализация boot.wim неполная. Проверьте matching ADK/WinPE add-on для версии целевого Windows.");
+    }
+
+    private static void ServiceLangIniForBoot(string dism, string stage, string architecture, List<string> warnings)
+    {
+        var langIni = Path.Combine(stage, "sources", "lang.ini");
+        if (File.Exists(langIni))
+        {
+            var content = File.ReadAllText(langIni);
+            if (!content.Contains("ru-RU", StringComparison.OrdinalIgnoreCase))
+                AddWarning(warnings, "sources\\lang.ini не содержит ru-RU. Проверьте список языков после запуска DISM /Gen-LangINI.");
+        }
+    }
+
+    private static void CreateAutounattendIfMissing(string stage, string architecture, List<string> warnings, Action<int, string> report)
+    {
+        var path = Path.Combine(stage, "autounattend.xml");
+        if (File.Exists(path))
+        {
+            AddWarning(warnings, "В исходном ISO уже был autounattend.xml; он сохранён без изменений во избежание потери пользовательских настроек. Проверьте его locale settings вручную.");
+            return;
+        }
+        var arch = architecture.Equals("arm64", StringComparison.OrdinalIgnoreCase) ? "arm64" :
+            architecture.Equals("x86", StringComparison.OrdinalIgnoreCase) ? "x86" : "amd64";
+        var xml = $@"<?xml version=""1.0"" encoding=""utf-8""?>
+<unattend xmlns=""urn:schemas-microsoft-com:unattend"">
+  <settings pass=""windowsPE"">
+    <component name=""Microsoft-Windows-International-Core-WinPE"" processorArchitecture=""{arch}"" publicKeyToken=""31bf3856ad364e35"" language=""neutral"" versionScope=""nonSxS"">
+      <SetupUILanguage><UILanguage>ru-RU</UILanguage></SetupUILanguage>
+      <InputLocale>ru-RU</InputLocale><SystemLocale>ru-RU</SystemLocale><UILanguage>ru-RU</UILanguage><UserLocale>ru-RU</UserLocale>
+    </component>
+  </settings>
+  <settings pass=""specialize"">
+    <component name=""Microsoft-Windows-International-Core"" processorArchitecture=""{arch}"" publicKeyToken=""31bf3856ad364e35"" language=""neutral"" versionScope=""nonSxS"">
+      <InputLocale>ru-RU</InputLocale><SystemLocale>ru-RU</SystemLocale><UILanguage>ru-RU</UILanguage><UserLocale>ru-RU</UserLocale>
+    </component>
+  </settings>
+  <settings pass=""oobeSystem"">
+    <component name=""Microsoft-Windows-International-Core"" processorArchitecture=""{arch}"" publicKeyToken=""31bf3856ad364e35"" language=""neutral"" versionScope=""nonSxS"">
+      <InputLocale>ru-RU</InputLocale><SystemLocale>ru-RU</SystemLocale><UILanguage>ru-RU</UILanguage><UserLocale>ru-RU</UserLocale>
+    </component>
+  </settings>
+</unattend>";
+        File.WriteAllText(path, xml, new UTF8Encoding(false));
+        report(86, "Добавлен autounattend.xml только с региональными параметрами ru-RU (страницы выбора диска/учётной записи не скрываются).");
+    }
+
+    private static void CopyRussianSetupResources(List<string> packageRoots, string stage, List<string> warnings, Action<int, string> report)
+    {
+        foreach (var root in packageRoots)
+        {
+            var russianSources = Path.Combine(root, "sources", "ru-ru");
+            if (!Directory.Exists(russianSources)) continue;
+            var target = Path.Combine(stage, "sources", "ru-ru");
+            CopyDirectory(russianSources, target);
+            report(9, "Скопированы локализованные ресурсы Windows Setup: sources\\ru-ru.");
+            return;
+        }
+        AddWarning(warnings, "Не найден каталог sources\\ru-ru с локализованными файлами Windows Setup. Даже при локализации boot.wim часть экранов Setup может остаться английской.");
+    }
+
+    private static string[] DiscoverRussianPackages(IEnumerable<string> packageRoots, IEnumerable<string> explicitFiles)
+    {
+        var found = new HashSet<string>(PathComparer);
+        foreach (var file in explicitFiles)
+        {
+            if (!File.Exists(file)) continue;
+            if (Path.GetExtension(file).Equals(".msu", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("MSU-пакеты не применяются: ты просил не обновлять Windows. Выбирай CAB-пакеты языка/FOD.");
+            if (Path.GetExtension(file).Equals(".cab", StringComparison.OrdinalIgnoreCase)) found.Add(Path.GetFullPath(file));
+        }
+        foreach (var root in packageRoots)
+        {
+            if (!Directory.Exists(root)) continue;
+            try
+            {
+                foreach (var file in Directory.EnumerateFiles(root, "*.cab", SearchOption.AllDirectories))
+                    if (IsRussianPath(file)) found.Add(Path.GetFullPath(file));
+            }
+            catch (Exception ex) { /* inaccessible folder is reported by the lack of packages below */ }
+        }
+        return found.OrderBy(p => p, PathComparer).ToArray();
+    }
+
+    private static List<string> FilterForArchitecture(string[] packages, string architecture, Action<int, string> report)
+    {
+        var kept = new List<string>();
+        foreach (var package in packages)
+        {
+            var name = Path.GetFileName(package).ToLowerInvariant();
+            var packageArch = name.Contains("arm64") ? "arm64" : name.Contains("x64") || name.Contains("amd64") ? "x64" :
+                Regex.IsMatch(name, @"(^|[_-])x86([_.-]|$)") ? "x86" : "";
+            var normalizedTarget = architecture.Equals("amd64", StringComparison.OrdinalIgnoreCase) ? "x64" : architecture;
+            if (!string.IsNullOrEmpty(packageArch) && !packageArch.Equals(normalizedTarget, StringComparison.OrdinalIgnoreCase))
+            {
+                report(8, $"Пропускаю CAB другой архитектуры: {Path.GetFileName(package)}");
+                continue;
+            }
+            kept.Add(package);
+        }
+        return kept;
+    }
+
+    private static string[] GetWinPeCabs(string winpeRoot)
+    {
+        if (!Directory.Exists(winpeRoot)) return Array.Empty<string>();
+        return Directory.GetFiles(winpeRoot, "*.cab", SearchOption.TopDirectoryOnly)
+            .Where(p => Path.GetFileName(p).Equals("lp.cab", StringComparison.OrdinalIgnoreCase) ||
+                        Path.GetFileName(p).Contains("ru-ru", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(p => Path.GetFileName(p).Equals("lp.cab", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .ThenBy(p => p, PathComparer).ToArray();
+    }
+
+    private static string? FindWinPePackageRoot(IEnumerable<string> roots)
+    {
+        foreach (var root in roots)
+        {
+            if (!Directory.Exists(root)) continue;
+            try
+            {
+                foreach (var lp in Directory.EnumerateFiles(root, "lp.cab", SearchOption.AllDirectories).Take(100))
+                {
+                    var dir = Path.GetDirectoryName(lp)!;
+                    if (dir.Contains("WinPE_OCs", StringComparison.OrdinalIgnoreCase) &&
+                        Path.GetFileName(dir).Equals("ru-ru", StringComparison.OrdinalIgnoreCase)) return dir;
+                }
+            }
+            catch { }
+        }
+        return null;
+    }
+
+    private static string? FindAdkWinPePackageRoot(string architecture)
+    {
+        var archFolder = architecture.Equals("arm64", StringComparison.OrdinalIgnoreCase) ? "arm64" :
+            architecture.Equals("x86", StringComparison.OrdinalIgnoreCase) ? "x86" : "amd64";
+        var roots = new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles) };
+        foreach (var root in roots.Where(Directory.Exists))
+        {
+            var adk = Path.Combine(root, "Windows Kits", "10", "Assessment and Deployment Kit", "Windows Preinstallation Environment", archFolder, "WinPE_OCs", "ru-ru");
+            if (File.Exists(Path.Combine(adk, "lp.cab"))) return adk;
+        }
+        return null;
+    }
+
+    private static bool IsRussianPath(string path) =>
+        path.Contains("ru-ru", StringComparison.OrdinalIgnoreCase) ||
+        path.Contains("ru_ru", StringComparison.OrdinalIgnoreCase) ||
+        path.Contains("russian", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsCoreLanguagePack(string path)
+    {
+        var name = Path.GetFileName(path);
+        return IsRussianPath(path) &&
+            (name.Contains("Language-Pack", StringComparison.OrdinalIgnoreCase) ||
+             name.Contains("LanguagePack", StringComparison.OrdinalIgnoreCase) ||
+             name.Contains("Client-Language-Pack", StringComparison.OrdinalIgnoreCase) ||
+             name.Contains("Server-Language-Pack", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsWinPePackage(string path) =>
+        path.Contains("WinPE_OCs", StringComparison.OrdinalIgnoreCase) ||
+        Path.GetFileName(path).StartsWith("WinPE-", StringComparison.OrdinalIgnoreCase) ||
+        Path.GetFileName(path).Equals("lp.cab", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsLanguageFeatureSatellite(string path)
+    {
+        var name = Path.GetFileName(path);
+        return name.Contains("LanguageFeatures-", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("LanguageFeature-", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string DetectArchitectureFromMedia(string stage, string dism)
+    {
+        var candidate = new[] { Path.Combine(stage, "sources", "install.wim"), Path.Combine(stage, "sources", "install.esd") }.FirstOrDefault(File.Exists);
+        if (candidate is null) return "x64";
+        var info = Run(dism, "/English", "/Get-WimInfo", "/WimFile:" + candidate);
+        var match = Regex.Match(info.Output, @"(?im)^\s*Architecture\s*:\s*(.+)$");
+        if (!match.Success)
+        {
+            var index = Run(dism, "/English", "/Get-WimInfo", "/WimFile:" + candidate, "/Index:1");
+            match = Regex.Match(index.Output, @"(?im)^\s*Architecture\s*:\s*(.+)$");
+            if (!match.Success) return "x64";
+        }
+        var raw = match.Groups[1].Value.Trim();
+        if (raw.Contains("ARM64", StringComparison.OrdinalIgnoreCase)) return "arm64";
+        if (raw.Contains("x86", StringComparison.OrdinalIgnoreCase) || raw.Contains("x86-based", StringComparison.OrdinalIgnoreCase)) return "x86";
+        return "x64";
+    }
+
+    private static ImageIndexInfo ParseImageInfo(int index, string output)
+    {
+        static string Value(string text, string key)
+        {
+            var m = Regex.Match(text, @"(?im)^\s*" + Regex.Escape(key) + @"\s*:\s*(.+)$");
+            return m.Success ? m.Groups[1].Value.Trim() : "unknown";
+        }
+        var name = Value(output, "Name");
+        var arch = Value(output, "Architecture");
+        if (arch.Contains("ARM64", StringComparison.OrdinalIgnoreCase)) arch = "arm64";
+        else if (arch.Contains("x86", StringComparison.OrdinalIgnoreCase)) arch = "x86";
+        else if (arch.Contains("x64", StringComparison.OrdinalIgnoreCase) || arch.Contains("amd64", StringComparison.OrdinalIgnoreCase)) arch = "x64";
+        var version = Value(output, "Version");
+        return new ImageIndexInfo(index, name, arch, version);
+    }
+
+    private static string? CreateBootOrderFile(string stage, string work)
+    {
+        var paths = new[]
+        {
+            "boot\\bcd", "boot\\boot.sdi", "boot\\bootfix.bin", "boot\\bootsect.exe",
+            "boot\\etfsboot.com", "boot\\memtest.efi", "boot\\memtest.exe",
+            "boot\\en-us\\bootsect.exe.mui", "boot\\fonts\\chs_boot.ttf", "boot\\fonts\\cht_boot.ttf",
+            "boot\\fonts\\jpn_boot.ttf", "boot\\fonts\\kor_boot.ttf", "boot\\fonts\\wgl4_boot.ttf",
+            "sources\\boot.wim"
+        };
+        var existing = paths.Where(p => File.Exists(Path.Combine(stage, p))).ToArray();
+        if (!existing.Any(p => p.Equals("sources\\boot.wim", StringComparison.OrdinalIgnoreCase))) return null;
+        var file = Path.Combine(work, "BootOrder.txt");
+        File.WriteAllLines(file, existing, new UTF8Encoding(false));
+        return file;
+    }
+
+    private static string MountIso(string isoPath)
+    {
+        var escaped = isoPath.Replace("'", "''");
+        var command = "$ErrorActionPreference='Stop'; $img=Mount-DiskImage -ImagePath '" + escaped +
+                      "' -PassThru; ($img | Get-Volume | Where-Object { $_.DriveLetter } | Select-Object -First 1 -ExpandProperty DriveLetter)";
+        var p = RunPowerShell(command);
+        EnsureSuccess(p, "Не удалось подключить ISO: " + isoPath);
+        var letter = p.Output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Select(s => s.Trim())
+            .LastOrDefault(s => Regex.IsMatch(s, @"^[A-Za-z]$"));
+        if (letter is null) throw new InvalidOperationException("Windows подключила ISO, но буква диска не определена: " + isoPath);
+        return letter;
+    }
+
+    private static void TryDismountIso(string isoPath)
+    {
+        try
+        {
+            var escaped = isoPath.Replace("'", "''");
+            RunPowerShell("$ErrorActionPreference='Continue'; Dismount-DiskImage -ImagePath '" + escaped + "' -ErrorAction SilentlyContinue");
+        }
+        catch { }
+    }
+
+    private static ProcResult RunPowerShell(string command) =>
+        Run("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command);
+
+    private static ProcResult Run(string exe, params string[] args)
+    {
+        var start = new ProcessStartInfo
+        {
+            FileName = exe,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
+        };
+        foreach (var arg in args) start.ArgumentList.Add(arg);
+        using var process = new Process { StartInfo = start };
+        var sb = new StringBuilder();
+        process.OutputDataReceived += (_, e) => { if (e.Data is not null) lock (sb) sb.AppendLine(e.Data); };
+        process.ErrorDataReceived += (_, e) => { if (e.Data is not null) lock (sb) sb.AppendLine(e.Data); };
+        process.Start();
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+        process.WaitForExit();
+        return new ProcResult(process.ExitCode, sb.ToString());
+    }
+
+    private static void EnsureSuccess(ProcResult result, string message)
+    {
+        if (result.ExitCode != 0) throw new InvalidOperationException(message + Environment.NewLine + ShortOutput(result.Output));
+    }
+
+    private static string ShortOutput(string output)
+    {
+        var trimmed = output.Trim();
+        if (trimmed.Length <= 1800) return trimmed;
+        return trimmed[^1800..];
+    }
+
+    private static void AddWarning(List<string> warnings, string warning)
+    {
+        if (!warnings.Contains(warning, StringComparer.OrdinalIgnoreCase)) warnings.Add(warning);
+    }
+
+    private static void CopyDirectory(string source, string destination)
+    {
+        Directory.CreateDirectory(destination);
+        foreach (var dir in Directory.GetDirectories(source, "*", SearchOption.AllDirectories))
+            Directory.CreateDirectory(Path.Combine(destination, Path.GetRelativePath(source, dir)));
+        foreach (var file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
+        {
+            var dest = Path.Combine(destination, Path.GetRelativePath(source, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+            File.Copy(file, dest, true);
+        }
+    }
+
+    private static string? FindDism()
+    {
+        var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        var candidates = new[]
+        {
+            Path.Combine(windows, "System32", "dism.exe"),
+            Path.Combine(windows, "Sysnative", "dism.exe")
+        };
+        return candidates.FirstOrDefault(File.Exists);
+    }
+
+    private static string? FindOscdimg()
+    {
+        var roots = new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles) };
+        foreach (var root in roots.Where(Directory.Exists))
+        {
+            var adk = Path.Combine(root, "Windows Kits", "10", "Assessment and Deployment Kit", "Deployment Tools");
+            if (!Directory.Exists(adk)) continue;
+            try
+            {
+                var hit = Directory.EnumerateFiles(adk, "oscdimg.exe", SearchOption.AllDirectories).FirstOrDefault();
+                if (hit is not null) return hit;
+            }
+            catch { }
+        }
+        return null;
+    }
+
+    private static bool IsAdministrator()
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+    }
+}
