@@ -745,6 +745,9 @@ internal static class UupLanguagePackDownloader
     {
         if (targetBuild is >= 19041 and <= 19045) return 19041;
         if (targetBuild is 22621 or 22631) return 22621;
+        // Windows 11 24H2, 25H2 and 26H2 use a shared servicing branch.
+        // 26H1 (build 28000) is intentionally not mapped to this baseline.
+        if (targetBuild is 26100 or 26200 or 26300) return 26100;
         return targetBuild;
     }
 
