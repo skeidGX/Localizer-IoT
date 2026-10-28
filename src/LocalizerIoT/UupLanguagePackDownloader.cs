@@ -222,12 +222,37 @@ internal static class UupLanguagePackDownloader
             }
         }
 
-        // Prefer the shared language-pack baseline first, but retain exact target-build
-        // candidates as a fallback. We never apply OS cumulative-update packages.
+        // UUP Dump occasionally returns no searchable rows for a supported release even
+        // while the build is present on the website. Keep known public 24H2 x64 entries as
+        // last-resort discovery seeds; package manifests and language availability are still
+        // queried live before any file is downloaded.
+        if (baseBuild == 26100 && architecture.Equals("x64", StringComparison.OrdinalIgnoreCase))
+        {
+            var fallbackCandidates = new[]
+            {
+                new UupBuild("ac94e557-eb76-4c8b-a064-0c72d6d3e09c", "26100.9711", "x64",
+                    "Windows 11, version 24H2 (26100.9711) amd64 [UUP fallback]", 0),
+                new UupBuild("d915627a-39bf-4f26-bda5-43a62e3de15f", "26100.9445", "x64",
+                    "Windows 11, version 24H2 (26100.9445) amd64 [UUP fallback]", 0),
+                new UupBuild("d02477e0-9520-488e-a36b-70efc7c94365", "26100.7781", "x64",
+                    "Windows 11, version 24H2 (26100.7781) amd64 [UUP fallback]", 0)
+            };
+            foreach (var candidate in fallbackCandidates)
+                all.TryAdd(candidate.Id, candidate);
+
+            log($"Резервный поиск для Windows 11 24H2: список UUP Dump содержит {all.Count} подходящих кандидатов (база 26100, {architecture}).");
+        }
+
+        if (all.Count == 0)
+            log($"UUP Dump не вернул сборки для поисковых запросов {string.Join(", ", buildNumbers)} и архитектуры {architecture}.");
+
+        // Prefer the original shared language-pack baseline (revision .1); if it is not
+        // listed, try the newest known build first. OS cumulative-update payloads remain excluded.
         return all.Values
             .OrderBy(b => ParseUupBuildNumber(b.Build) == baseBuild ? 0 : 1)
-            .ThenBy(b => GetBuildRevision(b.Build))
-            .ThenBy(b => b.Created)
+            .ThenBy(b => GetBuildRevision(b.Build) == 1 ? 0 : 1)
+            .ThenByDescending(b => GetBuildRevision(b.Build))
+            .ThenByDescending(b => b.Created)
             .Take(16)
             .ToList();
     }
@@ -541,14 +566,19 @@ internal static class UupLanguagePackDownloader
 
     private static int ParseUupBuildNumber(string version)
     {
-        var match = Regex.Match(version ?? "", @"^\s*(?<build>\d+)(?:\.|$)");
+        // UUP Dump normally returns "26100.1", but some API versions/records can include
+        // a full OS version such as "10.0.26100.1". Match the actual Windows build segment,
+        // not the leading major version ("10").
+        var match = Regex.Match(version ?? "", @"(?<!\d)(?<build>\d{4,6})(?:\.|$)");
         return match.Success && int.TryParse(match.Groups["build"].Value, out var result) ? result : 0;
     }
 
     private static int GetBuildRevision(string version)
     {
-        var parts = version.Split('.');
-        return parts.Length >= 2 && int.TryParse(parts[1], out var result) ? result : 0;
+        // Read the final numeric component so both "26100.9711" and "10.0.26100.9711"
+        // sort consistently.
+        var matches = Regex.Matches(version ?? "", @"\d+");
+        return matches.Count > 0 && int.TryParse(matches[matches.Count - 1].Value, out var result) ? result : 0;
     }
 
     private static string NormalizeArchitecture(string architecture)
