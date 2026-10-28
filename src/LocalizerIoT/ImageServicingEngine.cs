@@ -663,6 +663,9 @@ internal static class ImageServicingEngine
     <component name=""Microsoft-Windows-International-Core"" processorArchitecture=""{arch}"" publicKeyToken=""31bf3856ad364e35"" language=""neutral"" versionScope=""nonSxS"">
       <InputLocale>0419:00000419;0409:00000409</InputLocale><SystemLocale>ru-RU</SystemLocale><UILanguage>ru-RU</UILanguage><UserLocale>ru-RU</UserLocale><UILanguageFallback>en-US</UILanguageFallback>
     </component>
+    <component name=""Microsoft-Windows-Shell-Setup"" processorArchitecture=""{arch}"" publicKeyToken=""31bf3856ad364e35"" language=""neutral"" versionScope=""nonSxS"">
+      <TimeZone>Russian Standard Time</TimeZone>
+    </component>
   </settings>
   <settings pass=""oobeSystem"">
     <component name=""Microsoft-Windows-International-Core"" processorArchitecture=""{arch}"" publicKeyToken=""31bf3856ad364e35"" language=""neutral"" versionScope=""nonSxS"">
