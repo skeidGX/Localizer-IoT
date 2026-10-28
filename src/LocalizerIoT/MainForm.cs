@@ -173,6 +173,8 @@ public sealed class MainForm : Form
         }
         if (string.IsNullOrWhiteSpace(_output.Text) || !Path.GetExtension(_output.Text).Equals(".iso", StringComparison.OrdinalIgnoreCase))
         { MessageBox.Show(this, "Укажи путь выходного ISO с расширением .iso."); return; }
+        if (string.Equals(Path.GetFullPath(_output.Text.Trim()), Path.GetFullPath(_iso.Text.Trim()), StringComparison.OrdinalIgnoreCase))
+        { MessageBox.Show(this, "Выходной ISO должен иметь отдельный путь и не может совпадать с исходным файлом."); return; }
         var oscdimg = FindOscdimg();
         if (oscdimg is null)
         {
@@ -220,6 +222,7 @@ public sealed class MainForm : Form
             var install = Path.Combine(sources, "install.wim");
             var esd = Path.Combine(sources, "install.esd");
             if (!File.Exists(install) && !File.Exists(esd)) throw new InvalidOperationException("Не найден install.wim/install.esd в скопированном ISO.");
+            var imageIndex = File.Exists(install) ? (int)_index.Value : 1;
             if (!File.Exists(install))
             {
                 report(15, "Экспортирую выбранный индекс из install.esd в отдельный install.wim…");
@@ -229,10 +232,10 @@ public sealed class MainForm : Form
             }
 
             report(24, "Проверяю индекс и монтирую образ Windows…");
-            var info = RunProcess(dism, $"/English /Get-WimInfo /WimFile:\"{install}\" /Index:{_index.Value}", 180000);
+            var info = RunProcess(dism, $"/English /Get-WimInfo /WimFile:\"{install}\" /Index:{imageIndex}", 180000);
             if (info.ExitCode != 0) throw new InvalidOperationException("Не удалось прочитать выбранный индекс. " + info.Output);
             Log(info.Output);
-            var mount = RunProcess(dism, $"/Mount-Image /ImageFile:\"{install}\" /Index:{_index.Value} /MountDir:\"{mountDir}\" /CheckIntegrity", 0);
+            var mount = RunProcess(dism, $"/Mount-Image /ImageFile:\"{install}\" /Index:{imageIndex} /MountDir:\"{mountDir}\" /CheckIntegrity", 0);
             if (mount.ExitCode != 0) throw new InvalidOperationException("Не удалось смонтировать образ: " + mount.Output);
 
             try
@@ -279,7 +282,7 @@ public sealed class MainForm : Form
             var mkiso = RunProcess(oscdimg, $"-m -o -u2 -udfver102 {bootData} \"{stage}\" \"{output}\"", 0);
             if (mkiso.ExitCode != 0) throw new InvalidOperationException("oscdimg завершился с ошибкой: " + mkiso.Output);
             report(100, "ISO создан: " + output);
-            File.WriteAllText(output + ".report.txt", $"Source ISO: {iso}{Environment.NewLine}Output ISO: {output}{Environment.NewLine}Edition index: {_index.Value}{Environment.NewLine}Packages: {string.Join(Environment.NewLine, packages)}{Environment.NewLine}Note: WinPE/WinRE, OOBE resources, and other WIM indexes were not serviced by this initial build.", Encoding.UTF8);
+            File.WriteAllText(output + ".report.txt", $"Source ISO: {iso}{Environment.NewLine}Output ISO: {output}{Environment.NewLine}Edition index: {imageIndex}{Environment.NewLine}Packages: {string.Join(Environment.NewLine, packages)}{Environment.NewLine}Note: WinPE/WinRE, OOBE resources, and other WIM indexes were not serviced by this initial build.", Encoding.UTF8);
         }
         finally
         {
