@@ -1041,6 +1041,183 @@ internal static class ImageServicingEngine
         return candidates.FirstOrDefault(File.Exists);
     }
 
+    private sealed record SetupKitRelease(string Name, string AdkUrl, string WinPeUrl);
+
+    public static bool HasCompatibleWinPePackages(string sourceIso, IEnumerable<string> extraRoots, Action<string> log)
+    {
+        string? mounted = null;
+        try
+        {
+            var dism = FindDism() ?? throw new InvalidOperationException("DISM.exe не найден.");
+            mounted = MountIso(sourceIso);
+            var bootWim = Path.Combine(mounted + @":\", "sources", "boot.wim");
+            if (!File.Exists(bootWim))
+            {
+                log("В исходном ISO нет sources\\boot.wim — отдельная локализация WinPE не требуется.");
+                return true;
+            }
+
+            var bootInfo = ReadImageInfo(dism, bootWim, 2);
+            var roots = new List<string>();
+            foreach (var root in extraRoots.Where(Directory.Exists))
+            {
+                var found = FindWinPePackageRoot(new[] { root });
+                if (found is not null) roots.Add(found);
+            }
+
+            var adkRoot = FindAdkWinPePackageRoot(bootInfo.Architecture);
+            if (adkRoot is not null) roots.Add(adkRoot);
+
+            foreach (var root in roots.Distinct(PathComparer))
+            {
+                if (!HasRequiredSetupLanguagePackages(root)) continue;
+                var files = GetWinPeCabs(root);
+                var lp = files.FirstOrDefault(p => Path.GetFileName(p).Equals("lp.cab", StringComparison.OrdinalIgnoreCase));
+                var setup = files.FirstOrDefault(p => Path.GetFileName(p).Contains("WinPE-Setup_ru-ru", StringComparison.OrdinalIgnoreCase));
+                var client = files.FirstOrDefault(p => Path.GetFileName(p).Contains("WinPE-Setup-Client_ru-ru", StringComparison.OrdinalIgnoreCase));
+                if (lp is null || setup is null || client is null) continue;
+
+                var checkWarnings = new List<string>();
+                try
+                {
+                    ValidatePackageCompatibility(dism, lp, bootInfo.Version, bootInfo.Architecture, checkWarnings);
+                    ValidatePackageCompatibility(dism, setup, bootInfo.Version, bootInfo.Architecture, checkWarnings);
+                    ValidatePackageCompatibility(dism, client, bootInfo.Version, bootInfo.Architecture, checkWarnings);
+                    if (checkWarnings.Count == 0)
+                    {
+                        log($"Найден совместимый WinPE language source: {root} (boot.wim {bootInfo.Version}/{bootInfo.Architecture}).");
+                        return true;
+                    }
+                    log($"WinPE source {root} не прошёл проверку метаданных: {string.Join("; ", checkWarnings)}");
+                }
+                catch (Exception ex)
+                {
+                    log($"WinPE source {root} несовместим с boot.wim: {ex.Message}");
+                }
+            }
+
+            log($"Не найден проверенный WinPE source ru-RU для boot.wim {bootInfo.Version}/{bootInfo.Architecture}.");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            log("Не удалось автоматически проверить WinPE language source: " + ex.Message);
+            return false;
+        }
+        finally
+        {
+            if (mounted is not null) TryDismountIso(sourceIso);
+        }
+    }
+
+    public static async Task EnsureCompatibleSetupToolsAsync(string sourceIso, Action<string> log)
+    {
+        var dism = FindDism() ?? throw new InvalidOperationException("DISM.exe не найден.");
+        var kitInfo = await Task.Run(() =>
+        {
+            string? mounted = null;
+            try
+            {
+                mounted = MountIso(sourceIso);
+                var bootWim = Path.Combine(mounted + @":\", "sources", "boot.wim");
+                if (!File.Exists(bootWim))
+                    throw new InvalidOperationException("В ISO отсутствует sources\\boot.wim; нельзя определить версию WinPE.");
+                return ReadImageInfo(dism, bootWim, 2);
+            }
+            finally
+            {
+                if (mounted is not null) TryDismountIso(sourceIso);
+            }
+        });
+
+        var build = ParseBootBuild(kitInfo.Version);
+        var release = SelectSetupKitRelease(build);
+        if (release is null)
+            throw new InvalidOperationException(
+                $"Автоматическая установка WinPE language add-on не настроена для build {kitInfo.Version}. " +
+                "Используйте ADK/WinPE add-on соответствующего выпуска вручную.");
+
+        var installRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Windows Kits", "10");
+        var adkInstaller = Path.Combine(Path.GetTempPath(), "LocalizerIoT-adksetup-" + Guid.NewGuid().ToString("N") + ".exe");
+        var peInstaller = Path.Combine(Path.GetTempPath(), "LocalizerIoT-adkwinpesetup-" + Guid.NewGuid().ToString("N") + ".exe");
+        try
+        {
+            log($"Подходящий набор для Windows Setup: {release.Name}; boot.wim build {build}, архитектура {kitInfo.Architecture}.");
+            log("Загружаю официальный Windows ADK bootstrapper и WinPE add-on с Microsoft; целевая Windows не обновляется.");
+            await DownloadSignedBootstrapperAsync(release.AdkUrl, adkInstaller, "Windows ADK", log);
+            await DownloadSignedBootstrapperAsync(release.WinPeUrl, peInstaller, "Windows PE add-on", log);
+
+            log("Устанавливаю Deployment Tools совместимого ADK…");
+            var installAdk = await Task.Run(() => Run(adkInstaller, "/quiet", "/installpath", installRoot, "/features", "OptionId.DeploymentTools"));
+            if (installAdk.ExitCode != 0 && installAdk.ExitCode != 3010)
+                throw new InvalidOperationException("Установка совместимого ADK завершилась с кодом " + installAdk.ExitCode + ". " + ShortOutput(installAdk.Output));
+
+            log("Устанавливаю WinPE optional components и ru-RU язык для WinPE…");
+            var installPe = await Task.Run(() => Run(peInstaller, "/quiet", "/installpath", installRoot));
+            if (installPe.ExitCode != 0 && installPe.ExitCode != 3010)
+                throw new InvalidOperationException("Установка WinPE add-on завершилась с кодом " + installPe.ExitCode + ". " + ShortOutput(installPe.Output));
+
+            var archFolder = kitInfo.Architecture.Equals("arm64", StringComparison.OrdinalIgnoreCase) ? "arm64" :
+                kitInfo.Architecture.Equals("x86", StringComparison.OrdinalIgnoreCase) ? "x86" : "amd64";
+            var ruRoot = Path.Combine(installRoot, "Assessment and Deployment Kit", "Windows Preinstallation Environment",
+                archFolder, "WinPE_OCs", "ru-ru");
+            if (!HasRequiredSetupLanguagePackages(ruRoot))
+                throw new InvalidOperationException(
+                    "Установщики завершились, но обязательные WinPE CAB ru-RU не найдены: " + ruRoot +
+                    ". Возможно, Microsoft изменил структуру установщика или выбранный add-on не содержит эти компоненты.");
+
+            if (FindOscdimg() is null)
+                throw new InvalidOperationException("Не найден oscdimg.exe после установки compatible ADK Deployment Tools.");
+
+            var check = await Task.Run(() => HasCompatibleWinPePackages(sourceIso, Array.Empty<string>(), log));
+            if (!check)
+                throw new InvalidOperationException("После установки WinPE add-on метаданные пакетов всё ещё не совпадают с boot.wim. Образ Setup не следует изменять.");
+            log("Совместимый ADK/WinPE установлен и проверен.");
+        }
+        finally
+        {
+            try { if (File.Exists(adkInstaller)) File.Delete(adkInstaller); } catch { }
+            try { if (File.Exists(peInstaller)) File.Delete(peInstaller); } catch { }
+        }
+    }
+
+    private static async Task DownloadSignedBootstrapperAsync(string url, string destination, string label, Action<string> log)
+    {
+        using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
+        using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+        response.EnsureSuccessStatusCode();
+        await using (var remote = await response.Content.ReadAsStreamAsync())
+        await using (var local = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 128, useAsync: true))
+            await remote.CopyToAsync(local);
+
+        log($"Проверяю подпись Microsoft у установщика {label}…");
+        var escaped = destination.Replace("'", "''");
+        var signatureCommand = "$sig = Get-AuthenticodeSignature -LiteralPath '" + escaped +
+            "'; if ($sig.Status -ne 'Valid' -or $null -eq $sig.SignerCertificate -or $sig.SignerCertificate.Subject -notmatch 'Microsoft Corporation') { Write-Error 'The Microsoft Authenticode signature is not valid.'; exit 51 }";
+        var signature = await Task.Run(() => Run("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", signatureCommand));
+        EnsureSuccess(signature, $"Не удалось подтвердить цифровую подпись Microsoft у установщика {label}. Установка отменена.");
+    }
+
+    private static int ParseBootBuild(string version)
+    {
+        var match = Regex.Match(version ?? "", @"(?:^|\.)10\.0\.(?<build>\d+)(?:\.|$)|(?:^|\.)0\.(?<b2>\d+)(?:\.|$)");
+        var text = match.Groups["build"].Success ? match.Groups["build"].Value : match.Groups["b2"].Value;
+        return int.TryParse(text, out var build) ? build : 0;
+    }
+
+    private static SetupKitRelease? SelectSetupKitRelease(int build)
+    {
+        if (build == 17763)
+            return new SetupKitRelease("Windows 10 version 1809 / LTSC 2019", "https://go.microsoft.com/fwlink/?linkid=2026036", "https://go.microsoft.com/fwlink/?linkid=2022233");
+        if (build is >= 19041 and <= 19045)
+            return new SetupKitRelease("Windows 10 version 2004–22H2 / LTSC 2021", "https://go.microsoft.com/fwlink/?linkid=2120254", "https://go.microsoft.com/fwlink/?linkid=2120253");
+        if (build is 22621 or 22631)
+            return new SetupKitRelease("Windows 11 versions 22H2/23H2", "https://go.microsoft.com/fwlink/?linkid=2196127", "https://go.microsoft.com/fwlink/?linkid=2196224");
+        if (build is >= 26100 and <= 26299)
+            return new SetupKitRelease("Windows 11 version 24H2 or newer compatible servicing baseline", "https://go.microsoft.com/fwlink/?linkid=2289980", "https://go.microsoft.com/fwlink/?linkid=2289981");
+        return null;
+    }
+
     public static string? FindOscdimgPath() => FindOscdimg();
 
     public static async Task EnsureDeploymentToolsAsync(Action<string> log)
